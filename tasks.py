@@ -1,9 +1,9 @@
 import pytz
 import asyncio
 import aiosqlite
-from datetime import datetime, timedelta
+from datetime import datetime
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from config import TIMEZONE, DB_NAME, logger
+from config import TIMEZONE, DB_NAME, logger, RETENTION_DAYS
 from database import Database
 
 async def checker(bot):
@@ -20,7 +20,6 @@ async def checker(bot):
             for r in rows:
                 rid, chat_id, text, user_id, status, recurrence, r_time = r
                 user = await Database.get_user(user_id)
-                # user[0]=is_toxic, user[4]=spam_mode
                 is_toxic, spam_mode = user[0], user[4]
 
                 if spam_mode:
@@ -33,13 +32,11 @@ async def checker(bot):
                     except Exception as e: logger.error(f"Send error: {e}")
                 
                 else:
-                    # Звичайний режим
                     if status == 'pending':
                         try: await bot.send_message(chat_id, f"🔔 Нагадування: {text}")
                         except: pass
-                        
                         if recurrence:
-                            # Проста логіка для повторень
+                            # Тут можна додати логіку повторень (поки просто як виконане)
                             await db.execute("UPDATE reminders SET status='fired' WHERE id=?", (rid,))
                         else:
                             await db.execute("UPDATE reminders SET status='fired' WHERE id=?", (rid,))
@@ -47,3 +44,15 @@ async def checker(bot):
             await db.commit()
     except Exception as e:
         logger.error(f"Task error: {e}")
+
+async def background_maintenance():
+    """Фонове очищення старих даних"""
+    while True:
+        try:
+            logger.info("🧹 Maintenance: Очищення бази...")
+            await Database.clean_old_data(days=RETENTION_DAYS)
+            # Чекаємо 24 години
+            await asyncio.sleep(86400)
+        except Exception as e:
+            logger.error(f"Maintenance error: {e}")
+            await asyncio.sleep(3600)

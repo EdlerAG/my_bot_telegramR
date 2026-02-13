@@ -1,36 +1,29 @@
 import os
 import json
 import re
+import asyncio
 from datetime import datetime
 from aiogram import Router, F, types
-from aiogram.filters import CommandStart, StateFilter
+from aiogram.filters import CommandStart, Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, ErrorEvent
 from aiogram_calendar import SimpleCalendar, SimpleCalendarCallback
 
 from database import Database
+from config import ADMIN_IDS, logger
 from ai_engine import groq_text_brain, groq_transcribe, groq_analyze_image
 
 router = Router()
 
 # --- ДОДАТКОВА ФУНКЦІЯ: НОРМАЛІЗАЦІЯ ЧАСУ ---
 def normalize_time(text_time):
-    """
-    Перетворює '21.30', '21,30', '21 30' у '21:30'.
-    Якщо формат невірний, повертає None.
-    """
-    # Замінюємо крапки, коми та пробіли на двокрапку
     clean_time = text_time.replace('.', ':').replace(',', ':').replace(' ', ':')
-    
-    # Перевіряємо чи це формат ГГ:ХХ
     if re.match(r"^\d{1,2}:\d{2}$", clean_time):
-        # Додаємо нуль спереду, якщо треба (9:00 -> 09:00)
         parts = clean_time.split(':')
         h, m = int(parts[0]), int(parts[1])
         if 0 <= h <= 23 and 0 <= m <= 59:
             return f"{h:02d}:{m:02d}"
-            
     return None
 
 # --- МАШИНА СТАНІВ (FSM) ---
@@ -69,16 +62,126 @@ def get_time_kb():
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-# --- БАЗОВІ КОМАНДИ ---
+# --- АДМІН ПАНЕЛЬ ---
+@router.message(Command("admin"))
+@router.message(Command("stats"))
+async def admin_stats(m: types.Message):
+    if m.from_user.id not in ADMIN_IDS: return
+    
+    users_count, active_rems = await Database.get_stats()
+    db_size = os.path.getsize("jarvis_db.db") / (1024 * 1024) if os.path.exists("jarvis_db.db") else 0
+    
+    await m.answer(
+        f"📊 **Статистика Адміна:**\n"
+        f"👥 Користувачів: `{users_count}`\n"
+        f"⏳ Активних нагадувань: `{active_rems}`\n"
+        f"💾 Розмір бази: `{db_size:.2f} MB`",
+        parse_mode="Markdown"
+    )
 
+@router.message(Command("users"))
+async def admin_users_list(m: types.Message):
+    if m.from_user.id not in ADMIN_IDS: return
+
+    users = await Database.get_all_users()
+    msg = f"👥 **Всього користувачів:** {len(users)}\n\n"
+    for u in users:
+        status = "😈" if u[1] else "😇"
+        msg += f"{status} ID: `{u[0]}`\n"
+    await m.answer(msg, parse_mode="Markdown")
+
+@router.message(Command("all_reminders"))
+async def admin_all_rems(m: types.Message):
+    if m.from_user.id not in ADMIN_IDS: return
+
+    rems = await Database.get_all_active_reminders()
+    if not rems: return await m.answer("Нагадувань немає.")
+
+    msg = "⏳ **Всі активні нагадування:**\n\n"
+    for r in rems:
+        # r = (id, user_id, text, time)
+        msg += f"👤 `{r[1]}` | ⏰ {r[3]}\n📝 {r[2]}\n\n"
+    
+    if len(msg) > 4000:
+        await m.answer(msg[:4000] + "\n... (обрізано)")
+    else:
+        await m.answer(msg, parse_mode="Markdown")
+
+@router.message(Command("all_notes"))
+async def admin_spy_notes(m: types.Message):
+    if m.from_user.id not in ADMIN_IDS: return
+
+    notes = await Database.get_latest_notes(limit=10)
+    msg = "🕵️ **Останні 10 нотаток у системі:**\n\n"
+    for n in notes:
+        msg += f"👤 `{n[0]}`: {n[1]} \n🕒 _{n[2]}_\n---\n"
+    await m.answer(msg, parse_mode="Markdown")
+
+@router.message(Command("broadcast"))
+async def admin_broadcast(m: types.Message):
+    if m.from_user.id not in ADMIN_IDS: return
+    text = m.text.replace("/broadcast", "").strip()
+    if not text: return await m.answer("⚠️ Текст?")
+    
+    users = await Database.get_all_users()
+    count = 0
+    await m.answer("🚀 Починаю розсилку...")
+    for user in users:
+        try:
+            await m.bot.send_message(user[0], f"📢 <b>Оголошення:</b>\n\n{text}", parse_mode="HTML")
+            count += 1
+            await asyncio.sleep(0.05)
+        except: continue
+    await m.answer(f"✅ Успішно: {count}")
+
+@router.message(Command("db_clean"))
+async def manual_clean(m: types.Message):
+    if m.from_user.id not in ADMIN_IDS: return
+    await Database.clean_old_data(days=0)
+    await m.answer("🧹 База повністю очищена від виконаних завдань.")
+
+# --- СИСТЕМА ЛОВЛІ ПОМИЛОК ---
+@router.error()
+async def error_handler(event: ErrorEvent):
+    logger.error(f"Critical Error: {event.exception}", exc_info=True)
+    err_msg = f"⚠️ **CRITICAL ERROR**\n\nUpdate: `{event.update}`\n\nError: `{event.exception}`"
+    try:
+        if ADMIN_IDS:
+            await event.update.bot.send_message(ADMIN_IDS[0], err_msg[:4000], parse_mode="Markdown")
+    except: pass
+
+# --- НОТАТКИ (SECOND BRAIN) ---
+@router.message(Command("note"))
+async def add_note_handler(m: types.Message):
+    text = m.text.replace("/note", "").strip()
+    if not text:
+        return await m.answer("✍️ Напиши текст: `/note купити хліб`", parse_mode="Markdown")
+    await Database.add_note(m.from_user.id, text)
+    await m.answer("✅ Нотатка збережена!")
+
+@router.message(Command("search"))
+async def search_notes_handler(m: types.Message):
+    query = m.text.replace("/search", "").strip()
+    if not query:
+        return await m.answer("🔍 Що шукати?", parse_mode="Markdown")
+    
+    results = await Database.search_notes(m.from_user.id, query)
+    if not results:
+        return await m.answer("🤷‍♂️ Нічого не знайшов.")
+        
+    response = "<b>🔎 Знайдені записи:</b>\n\n"
+    for note_text, created_at in results:
+        response += f"🔹 {note_text} <i>({created_at[:16]})</i>\n"
+    await m.answer(response, parse_mode="HTML")
+
+# --- БАЗОВІ КОМАНДИ ---
 @router.message(CommandStart())
 async def start(m: types.Message, state: FSMContext):
     await state.clear()
     await Database.get_user(m.from_user.id)
     await m.answer("Йо. Я на місці.", reply_markup=await get_kb(m.from_user.id))
 
-# --- СТВОРЕННЯ НАГАДУВАННЯ (Create) ---
-
+# --- СТВОРЕННЯ НАГАДУВАННЯ ---
 @router.message(F.text == "📅 Створити нагадування")
 async def start_creation(m: types.Message, state: FSMContext):
     await m.answer("✍️ Напиши текст нагадування:", parse_mode="Markdown")
@@ -98,7 +201,7 @@ async def process_calendar(callback: types.CallbackQuery, callback_data: dict, s
     if selected:
         formatted_date = date.strftime("%Y-%m-%d")
         await state.update_data(remind_date=formatted_date)
-        await callback.message.edit_text(f"📅 Дата: {formatted_date}\n⏰ Оберіть час або напишіть (ГГ:ХХ, ГГ ХХ, ГГ.ХХ):", reply_markup=get_time_kb())
+        await callback.message.edit_text(f"📅 Дата: {formatted_date}\n⏰ Оберіть час або напишіть (ГГ:ХХ):", reply_markup=get_time_kb())
         await state.set_state(ReminderFSM.waiting_for_time)
 
 @router.callback_query(F.data.startswith("time_"), StateFilter(ReminderFSM.waiting_for_time))
@@ -109,64 +212,44 @@ async def process_time_btn(callback: types.CallbackQuery, state: FSMContext):
 
 @router.message(StateFilter(ReminderFSM.waiting_for_time))
 async def process_time_text(m: types.Message, state: FSMContext):
-    # Використовуємо нову функцію для перевірки формату
     clean_time = normalize_time(m.text)
-    
     if not clean_time:
-        return await m.answer("⚠️ Невірний формат. Спробуйте так: 14:30, 14.30 або 14 30")
-    
+        return await m.answer("⚠️ Невірний формат. Спробуйте так: 14:30")
     await finalize_reminder(m, clean_time, state, m.from_user.id)
 
 async def finalize_reminder(message: types.Message, time_str: str, state: FSMContext, user_id: int):
     data = await state.get_data()
     full_datetime = f"{data['remind_date']} {time_str}:00"
     await Database.add_reminder(user_id, message.chat.id, data['remind_text'], full_datetime, recurrence=None)
-    
-    # ТУТ ПОРЯДОК: ТЕКСТ -> ЧАС
-    await message.answer(
-        f"✅ **Створено!**\n📌 {data['remind_text']}\n⏰ {full_datetime}", 
-        parse_mode="Markdown", 
-        reply_markup=await get_kb(user_id)
-    )
+    await message.answer(f"✅ **Створено!**\n📌 {data['remind_text']}\n⏰ {full_datetime}", parse_mode="Markdown", reply_markup=await get_kb(user_id))
     await state.clear()
 
-# --- СПИСОК ПЛАНІВ (List & View) ---
-
+# --- СПИСОК ПЛАНІВ ---
 @router.message(F.text == "📋 Список планів")
 async def show_list(m: types.Message):
     rows = await Database.get_active_reminders(m.from_user.id)
     if not rows: return await m.answer("У вас немає активних планів 🤷‍♂️")
     
     today_str = datetime.now().strftime("%Y-%m-%d")
-    
     await m.answer("📋 **Ваші плани:**", parse_mode="Markdown")
     
     for r in rows:
         rid, r_time, r_text = r
         r_date = r_time.split(" ")[0]
         r_clock = r_time.split(" ")[1][:5]
-        
-        # Формуємо рядок часу
-        if r_date == today_str:
-             date_info = f"Сьогодні о {r_clock}"
-        else:
-             date_info = f"{r_date} о {r_clock}"
+        date_info = f"Сьогодні о {r_clock}" if r_date == today_str else f"{r_date} о {r_clock}"
         
         kb = InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text="✏️ Змінити", callback_data=f"edit_{rid}"),
             InlineKeyboardButton(text="❌ Видалити", callback_data=f"del_{rid}")
         ]])
-        
-        # ТУТ ПОРЯДОК: ТЕКСТ -> ЧАС
         await m.answer(f"📝 *{r_text}*\n⏰ {date_info}", parse_mode="Markdown", reply_markup=kb)
 
-# --- РЕДАГУВАННЯ (Edit) ---
-
+# --- РЕДАГУВАННЯ ---
 @router.callback_query(F.data.startswith("edit_"))
 async def edit_start(call: types.CallbackQuery, state: FSMContext):
     rid = call.data.split("_")[1]
     await state.update_data(edit_id=rid)
-    
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📝 Змінити текст", callback_data="edopt_text")],
         [InlineKeyboardButton(text="⏰ Змінити час", callback_data="edopt_time")],
@@ -179,22 +262,18 @@ async def edit_start(call: types.CallbackQuery, state: FSMContext):
 @router.callback_query(F.data.startswith("edopt_"), StateFilter(EditFSM.choosing_option))
 async def edit_option_handler(call: types.CallbackQuery, state: FSMContext):
     action = call.data.split("_")[1]
-    
     if action == "cancel":
         await call.message.delete()
         await state.clear()
         return
-        
     if action == "text":
         await call.message.edit_text("Введіть новий текст:")
         await state.set_state(EditFSM.editing_text)
-        
     elif action == "time":
         calendar = SimpleCalendar()
         await call.message.edit_text("Оберіть нову дату:", reply_markup=await calendar.start_calendar())
         await state.set_state(EditFSM.editing_date)
 
-# Редагування ТЕКСТУ
 @router.message(StateFilter(EditFSM.editing_text))
 async def save_new_text(m: types.Message, state: FSMContext):
     data = await state.get_data()
@@ -202,14 +281,13 @@ async def save_new_text(m: types.Message, state: FSMContext):
     await m.answer("✅ Текст оновлено!", reply_markup=await get_kb(m.from_user.id))
     await state.clear()
 
-# Редагування ЧАСУ (Календар -> Час)
 @router.callback_query(SimpleCalendarCallback.filter(), StateFilter(EditFSM.editing_date))
 async def edit_date_process(callback: types.CallbackQuery, callback_data: dict, state: FSMContext):
     calendar = SimpleCalendar()
     selected, date = await calendar.process_selection(callback, callback_data)
     if selected:
         await state.update_data(new_date=date.strftime("%Y-%m-%d"))
-        await callback.message.edit_text("Введіть новий час (наприклад 18:30 або 18 30):", reply_markup=get_time_kb())
+        await callback.message.edit_text("Введіть новий час:", reply_markup=get_time_kb())
         await state.set_state(EditFSM.editing_time)
 
 @router.callback_query(F.data.startswith("time_"), StateFilter(EditFSM.editing_time))
@@ -221,8 +299,7 @@ async def edit_time_btn(callback: types.CallbackQuery, state: FSMContext):
 async def edit_time_text(m: types.Message, state: FSMContext):
     clean_time = normalize_time(m.text)
     if not clean_time:
-        return await m.answer("⚠️ Невірний формат. Спробуйте так: 14:30, 14.30 або 14 30")
-    
+        return await m.answer("⚠️ Невірний формат.")
     await save_new_time(m, clean_time, state)
 
 async def save_new_time(message, time_val, state):
@@ -232,8 +309,6 @@ async def save_new_time(message, time_val, state):
     await message.answer(f"✅ Час перенесено на {full_dt}", reply_markup=await get_kb(message.chat.id))
     await state.clear()
 
-# --- ВИДАЛЕННЯ ---
-
 @router.callback_query(F.data.startswith("del_"))
 async def del_rem(call: types.CallbackQuery):
     rid = call.data.split("_")[1]
@@ -242,7 +317,6 @@ async def del_rem(call: types.CallbackQuery):
     await call.answer("Видалено")
 
 # --- ІНШІ ХЕНДЛЕРИ ---
-
 @router.message(F.text.in_({"😈 Включити Бидло", "😇 Включити Няшку"}))
 async def toggle_toxic(m: types.Message):
     u = await Database.get_user(m.from_user.id)
@@ -282,12 +356,17 @@ async def location_handler(m: types.Message):
 
 @router.message(F.text)
 async def text_handler(m: types.Message):
-    if m.text in ["📋 Список планів", "📍 Погода", "📅 Створити нагадування"]: return
+    ignored = ["📋 Список планів", "📍 Погода", "📅 Створити нагадування", 
+               "😈 Включити Бидло", "😇 Включити Няшку", "🔔 Спам: ON", "🔕 Спам: OFF"]
+    if m.text in ignored: return
+    if m.text.startswith("/"): return
     await process_smart(m, m.text)
 
 async def process_smart(m, text):
     u = await Database.get_user(m.from_user.id)
-    res = await groq_text_brain(text, m.from_user.id, u[0], u[3], u[1], u[2], bool(m.forward_origin))
+    # Прибрали memory_json, бо ai_engine тепер сам бере його з БД
+    res = await groq_text_brain(text, m.from_user.id, u[0], u[1], u[2], bool(m.forward_origin))
+    
     if not res: return await m.answer("Еррор.")
     
     reply = res.get('reply', '...')
@@ -295,9 +374,7 @@ async def process_smart(m, text):
         await Database.add_reminder(m.from_user.id, m.chat.id, res['task'], res['time'], res['recurrence'])
         reply += f"\n⏰ (Нагадування на {res['time']})"
 
-    try: mem = json.loads(u[3])
-    except: mem = []
-    mem.append({"role": "user", "content": text})
-    mem.append({"role": "assistant", "content": reply})
-    await Database.update_user(m.from_user.id, memory_json=json.dumps(mem[-10:]))
+    # Зберігаємо контекст у нову таблицю
+    await Database.add_to_context(m.from_user.id, "user", text)
+    await Database.add_to_context(m.from_user.id, "assistant", reply)
     await m.answer(reply)

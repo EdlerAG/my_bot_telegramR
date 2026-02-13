@@ -5,8 +5,6 @@ from datetime import datetime
 import pytz
 from config import GROQ_KEY, TIMEZONE, logger
 from utils import clean_json_response, get_weather
-# Видаляємо циклічний імпорт Database, беремо дані напряму або передаємо їх
-# Але в handlers.py ми передаємо memory, lat, lon аргументами, тому тут Database не потрібен!
 
 MODEL_TEXT = "llama-3.3-70b-versatile"
 MODEL_VISION = "llama-3.2-11b-vision-preview"
@@ -46,15 +44,15 @@ async def groq_analyze_image(text_prompt, image_path, is_toxic):
                 return (await resp.json())['choices'][0]['message']['content']
     except: return "Не бачу картинки."
 
-async def groq_text_brain(text, user_id, is_toxic, memory_json, lat, lon, is_forwarded=False):
-    # Тут потрібен доступ до нотаток. 
-    # Щоб уникнути циклічного імпорту, імпортуємо Database всередині функції
-    import aiosqlite
-    from config import DB_NAME
+async def groq_text_brain(text, user_id, is_toxic, lat, lon, is_forwarded=False):
+    # Імпорт тут, щоб не було циклічності
+    from database import Database
     
-    async with aiosqlite.connect(DB_NAME) as db:
-        async with db.execute("SELECT content FROM notes WHERE user_id=? ORDER BY id DESC LIMIT 5", (user_id,)) as c:
-            notes = [row[0] for row in await c.fetchall()]
+    # 1. Отримуємо нотатки
+    notes = await Database.get_recent_notes(user_id)
+    
+    # 2. Отримуємо історію діалогу (контекст)
+    history = await Database.get_context(user_id)
     
     weather_info = "Unknown"
     if lat and lon:
@@ -67,8 +65,11 @@ async def groq_text_brain(text, user_id, is_toxic, memory_json, lat, lon, is_for
     system_prompt = f"""
     {persona}. Language: Ukrainian.
     Time: {now.strftime("%Y-%m-%d %H:%M:%S")}. Weather: {weather_info}.
-    Notes: {notes}. Forwarded: {is_forwarded}.
-    INSTRUCTION: Distinguish reminders from chat.
+    User Notes (Second Brain): {notes}. Forwarded message: {is_forwarded}.
+    INSTRUCTION: 
+    1. If user asks to save something -> return "save_note": "text".
+    2. If user asks to remind -> return "is_reminder": true.
+    3. Else -> just chat.
     JSON OUTPUT ONLY:
     {{
         "is_reminder": boolean,
@@ -79,10 +80,7 @@ async def groq_text_brain(text, user_id, is_toxic, memory_json, lat, lon, is_for
         "reply": "string"
     }}
     """
-    try:
-        history = json.loads(memory_json)[-6:]
-    except: history = []
-
+    
     messages = [{"role": "system", "content": system_prompt}] + history + [{"role": "user", "content": text}]
     
     try:
