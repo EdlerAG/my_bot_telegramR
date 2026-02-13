@@ -1,0 +1,8 @@
+.env
+__pycache__/
+*.py[cod]
+*.db
+venv/
+*.log
+voice_*.ogg
+photo_*.jpg
