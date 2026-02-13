@@ -10,15 +10,17 @@ from handlers import router
 from tasks import checker
 
 async def main():
-    # Ініціалізація
+    # Ініціалізація БД
     await Database.init()
+    
+    # Ініціалізація Бота
     bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
     dp = Dispatcher()
     
-    # Підключаємо роутери (наші handlers.py)
+    # Підключаємо роутери
     dp.include_router(router)
     
-    # Запускаємо планувальник
+    # Запускаємо планувальник і передаємо туди бота!
     scheduler = AsyncIOScheduler()
     scheduler.add_job(checker, 'interval', seconds=30, args=[bot])
     scheduler.start()

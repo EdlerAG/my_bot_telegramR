@@ -5,7 +5,8 @@ from datetime import datetime
 import pytz
 from config import GROQ_KEY, TIMEZONE, logger
 from utils import clean_json_response, get_weather
-from database import Database
+# Видаляємо циклічний імпорт Database, беремо дані напряму або передаємо їх
+# Але в handlers.py ми передаємо memory, lat, lon аргументами, тому тут Database не потрібен!
 
 MODEL_TEXT = "llama-3.3-70b-versatile"
 MODEL_VISION = "llama-3.2-11b-vision-preview"
@@ -46,7 +47,12 @@ async def groq_analyze_image(text_prompt, image_path, is_toxic):
     except: return "Не бачу картинки."
 
 async def groq_text_brain(text, user_id, is_toxic, memory_json, lat, lon, is_forwarded=False):
-    async with aiosqlite.connect("jarvis_db.db") as db:
+    # Тут потрібен доступ до нотаток. 
+    # Щоб уникнути циклічного імпорту, імпортуємо Database всередині функції
+    import aiosqlite
+    from config import DB_NAME
+    
+    async with aiosqlite.connect(DB_NAME) as db:
         async with db.execute("SELECT content FROM notes WHERE user_id=? ORDER BY id DESC LIMIT 5", (user_id,)) as c:
             notes = [row[0] for row in await c.fetchall()]
     
