@@ -1,12 +1,15 @@
 import pytz
 import asyncio
 import aiosqlite
+import os
 from datetime import datetime
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from config import TIMEZONE, DB_NAME, logger, RETENTION_DAYS
+from aiogram import Bot
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
+from config import TIMEZONE, DB_NAME, logger, RETENTION_DAYS, ADMIN_IDS
 from database import Database
+from utils import create_backup
 
-async def checker(bot):
+async def checker(bot: Bot):
     """Фонова задача для перевірки нагадувань"""
     try:
         now = datetime.now(pytz.timezone(TIMEZONE)).strftime("%Y-%m-%d %H:%M:%S")
@@ -36,7 +39,7 @@ async def checker(bot):
                         try: await bot.send_message(chat_id, f"🔔 Нагадування: {text}")
                         except: pass
                         if recurrence:
-                            # Тут можна додати логіку повторень (поки просто як виконане)
+                            # Тут можна додати логіку повторень
                             await db.execute("UPDATE reminders SET status='fired' WHERE id=?", (rid,))
                         else:
                             await db.execute("UPDATE reminders SET status='fired' WHERE id=?", (rid,))
@@ -45,14 +48,26 @@ async def checker(bot):
     except Exception as e:
         logger.error(f"Task error: {e}")
 
-async def background_maintenance():
-    """Фонове очищення старих даних"""
+async def background_maintenance(bot: Bot):
+    """Щоденне очищення та щотижневий бекап"""
+    days_counter = 0
     while True:
         try:
-            logger.info("🧹 Maintenance: Очищення бази...")
+            # Чистимо базу
             await Database.clean_old_data(days=RETENTION_DAYS)
-            # Чекаємо 24 години
-            await asyncio.sleep(86400)
+            
+            # Раз на 7 днів - бекап
+            if days_counter % 7 == 0 and ADMIN_IDS:
+                backup_path = await create_backup()
+                if backup_path:
+                    try:
+                        await bot.send_document(ADMIN_IDS[0], FSInputFile(backup_path), caption="📦 Автоматичний бекап")
+                        os.remove(backup_path)
+                    except Exception as e:
+                        logger.error(f"Failed to send backup: {e}")
+
+            days_counter += 1
+            await asyncio.sleep(86400) # Чекаємо добу
         except Exception as e:
             logger.error(f"Maintenance error: {e}")
             await asyncio.sleep(3600)

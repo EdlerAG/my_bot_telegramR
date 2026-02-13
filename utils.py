@@ -1,6 +1,9 @@
 import re
 import aiohttp
-from config import logger
+import shutil
+import os
+from datetime import datetime
+from config import logger, DB_NAME
 
 def clean_json_response(text):
     """Витягує чистий JSON з відповіді ШІ"""
@@ -24,4 +27,14 @@ async def get_weather(lat, lon):
                 }
     except Exception as e:
         logger.error(f"Weather error: {e}")
+        return None
+
+async def create_backup():
+    """Створює копію бази даних для відправки"""
+    try:
+        backup_name = f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
+        shutil.copyfile(DB_NAME, backup_name)
+        return backup_name
+    except Exception as e:
+        logger.error(f"Backup error: {e}")
         return None

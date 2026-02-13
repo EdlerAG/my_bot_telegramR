@@ -2,17 +2,19 @@ import os
 import json
 import re
 import asyncio
+import sys
 from datetime import datetime
 from aiogram import Router, F, types
 from aiogram.filters import CommandStart, Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, ErrorEvent
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, ErrorEvent, FSInputFile
 from aiogram_calendar import SimpleCalendar, SimpleCalendarCallback
 
 from database import Database
 from config import ADMIN_IDS, logger
 from ai_engine import groq_text_brain, groq_transcribe, groq_analyze_image
+from utils import create_backup
 
 router = Router()
 
@@ -63,59 +65,41 @@ def get_time_kb():
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 # --- АДМІН ПАНЕЛЬ ---
-@router.message(Command("admin"))
+
 @router.message(Command("stats"))
 async def admin_stats(m: types.Message):
     if m.from_user.id not in ADMIN_IDS: return
-    
-    users_count, active_rems = await Database.get_stats()
+    u, r = await Database.get_stats()
     db_size = os.path.getsize("jarvis_db.db") / (1024 * 1024) if os.path.exists("jarvis_db.db") else 0
-    
-    await m.answer(
-        f"📊 **Статистика Адміна:**\n"
-        f"👥 Користувачів: `{users_count}`\n"
-        f"⏳ Активних нагадувань: `{active_rems}`\n"
-        f"💾 Розмір бази: `{db_size:.2f} MB`",
-        parse_mode="Markdown"
-    )
+    await m.answer(f"📊 **Статус:**\n👥 Юзерів: `{u}`\n⏳ Планів: `{r}`\n💾 База: `{db_size:.2f} MB`", parse_mode="Markdown")
 
 @router.message(Command("users"))
 async def admin_users_list(m: types.Message):
     if m.from_user.id not in ADMIN_IDS: return
-
     users = await Database.get_all_users()
     msg = f"👥 **Всього користувачів:** {len(users)}\n\n"
     for u in users:
-        status = "😈" if u[1] else "😇"
-        msg += f"{status} ID: `{u[0]}`\n"
+        msg += f"{'😈' if u[1] else '😇'} ID: `{u[0]}`\n"
     await m.answer(msg, parse_mode="Markdown")
 
 @router.message(Command("all_reminders"))
 async def admin_all_rems(m: types.Message):
     if m.from_user.id not in ADMIN_IDS: return
-
     rems = await Database.get_all_active_reminders()
     if not rems: return await m.answer("Нагадувань немає.")
-
     msg = "⏳ **Всі активні нагадування:**\n\n"
     for r in rems:
-        # r = (id, user_id, text, time)
         msg += f"👤 `{r[1]}` | ⏰ {r[3]}\n📝 {r[2]}\n\n"
-    
-    if len(msg) > 4000:
-        await m.answer(msg[:4000] + "\n... (обрізано)")
-    else:
-        await m.answer(msg, parse_mode="Markdown")
+    await m.answer(msg[:4000], parse_mode="Markdown")
 
 @router.message(Command("all_notes"))
 async def admin_spy_notes(m: types.Message):
     if m.from_user.id not in ADMIN_IDS: return
-
     notes = await Database.get_latest_notes(limit=10)
-    msg = "🕵️ **Останні 10 нотаток у системі:**\n\n"
+    msg = "🕵️ **Останні 10 нотаток:**\n\n"
     for n in notes:
-        msg += f"👤 `{n[0]}`: {n[1]} \n🕒 _{n[2]}_\n---\n"
-    await m.answer(msg, parse_mode="Markdown")
+        msg += f"👤 `{n[0]}`: {n[1]}\n"
+    await m.answer(msg[:4000], parse_mode="Markdown")
 
 @router.message(Command("broadcast"))
 async def admin_broadcast(m: types.Message):
@@ -126,7 +110,7 @@ async def admin_broadcast(m: types.Message):
     users = await Database.get_all_users()
     count = 0
     await m.answer("🚀 Починаю розсилку...")
-    for user in users:
+    for u in users:
         try:
             await m.bot.send_message(user[0], f"📢 <b>Оголошення:</b>\n\n{text}", parse_mode="HTML")
             count += 1
@@ -134,54 +118,57 @@ async def admin_broadcast(m: types.Message):
         except: continue
     await m.answer(f"✅ Успішно: {count}")
 
+@router.message(Command("backup"))
+async def cmd_backup(m: types.Message):
+    if m.from_user.id not in ADMIN_IDS: return
+    backup_path = await create_backup()
+    if backup_path:
+        await m.answer_document(FSInputFile(backup_path), caption=f"📦 Бекап від {datetime.now()}")
+        os.remove(backup_path)
+    else:
+        await m.answer("❌ Помилка створення бекапу.")
+
+@router.message(Command("restart"))
+async def cmd_restart(m: types.Message):
+    if m.from_user.id not in ADMIN_IDS: return
+    await m.answer("🔄 Перезавантажуюсь...")
+    os.execv(sys.executable, ['python'] + sys.argv)
+
 @router.message(Command("db_clean"))
 async def manual_clean(m: types.Message):
     if m.from_user.id not in ADMIN_IDS: return
     await Database.clean_old_data(days=0)
-    await m.answer("🧹 База повністю очищена від виконаних завдань.")
+    await m.answer("🧹 База очищена.")
 
-# --- СИСТЕМА ЛОВЛІ ПОМИЛОК ---
-@router.error()
-async def error_handler(event: ErrorEvent):
-    logger.error(f"Critical Error: {event.exception}", exc_info=True)
-    err_msg = f"⚠️ **CRITICAL ERROR**\n\nUpdate: `{event.update}`\n\nError: `{event.exception}`"
-    try:
-        if ADMIN_IDS:
-            await event.update.bot.send_message(ADMIN_IDS[0], err_msg[:4000], parse_mode="Markdown")
-    except: pass
+# --- КОРИСТУВАЦЬКІ ФУНКЦІЇ ---
 
-# --- НОТАТКИ (SECOND BRAIN) ---
+@router.message(Command("report"))
+async def cmd_report(m: types.Message):
+    text = m.text.replace("/report", "").strip()
+    if not text: return await m.answer("✍️ Опишіть проблему: `/report ...`")
+    for admin_id in ADMIN_IDS:
+        try: await m.bot.send_message(admin_id, f"📩 **REPORT від {m.from_user.id}:**\n{text}")
+        except: pass
+    await m.answer("✅ Надіслано.")
+
 @router.message(Command("note"))
 async def add_note_handler(m: types.Message):
     text = m.text.replace("/note", "").strip()
-    if not text:
-        return await m.answer("✍️ Напиши текст: `/note купити хліб`", parse_mode="Markdown")
+    if not text: return await m.answer("✍️ Приклад: `/note текст`")
     await Database.add_note(m.from_user.id, text)
-    await m.answer("✅ Нотатка збережена!")
+    await m.answer("✅ Збережено!")
 
 @router.message(Command("search"))
 async def search_notes_handler(m: types.Message):
     query = m.text.replace("/search", "").strip()
-    if not query:
-        return await m.answer("🔍 Що шукати?", parse_mode="Markdown")
-    
-    results = await Database.search_notes(m.from_user.id, query)
-    if not results:
-        return await m.answer("🤷‍♂️ Нічого не знайшов.")
-        
-    response = "<b>🔎 Знайдені записи:</b>\n\n"
-    for note_text, created_at in results:
-        response += f"🔹 {note_text} <i>({created_at[:16]})</i>\n"
-    await m.answer(response, parse_mode="HTML")
+    if not query: return await m.answer("🔍 Що шукати?")
+    res = await Database.search_notes(m.from_user.id, query)
+    if not res: return await m.answer("🤷‍♂️ Пусто.")
+    msg = "<b>🔎 Знайдено:</b>\n\n" + "\n".join([f"🔹 {n[0]}" for n in res])
+    await m.answer(msg, parse_mode="HTML")
 
-# --- БАЗОВІ КОМАНДИ ---
-@router.message(CommandStart())
-async def start(m: types.Message, state: FSMContext):
-    await state.clear()
-    await Database.get_user(m.from_user.id)
-    await m.answer("Йо. Я на місці.", reply_markup=await get_kb(m.from_user.id))
+# --- СТВОРЕННЯ НАГАДУВАННЯ (КНОПКИ) ---
 
-# --- СТВОРЕННЯ НАГАДУВАННЯ ---
 @router.message(F.text == "📅 Створити нагадування")
 async def start_creation(m: types.Message, state: FSMContext):
     await m.answer("✍️ Напиши текст нагадування:", parse_mode="Markdown")
@@ -224,7 +211,8 @@ async def finalize_reminder(message: types.Message, time_str: str, state: FSMCon
     await message.answer(f"✅ **Створено!**\n📌 {data['remind_text']}\n⏰ {full_datetime}", parse_mode="Markdown", reply_markup=await get_kb(user_id))
     await state.clear()
 
-# --- СПИСОК ПЛАНІВ ---
+# --- СПИСОК ПЛАНІВ ТА РЕДАГУВАННЯ ---
+
 @router.message(F.text == "📋 Список планів")
 async def show_list(m: types.Message):
     rows = await Database.get_active_reminders(m.from_user.id)
@@ -245,7 +233,6 @@ async def show_list(m: types.Message):
         ]])
         await m.answer(f"📝 *{r_text}*\n⏰ {date_info}", parse_mode="Markdown", reply_markup=kb)
 
-# --- РЕДАГУВАННЯ ---
 @router.callback_query(F.data.startswith("edit_"))
 async def edit_start(call: types.CallbackQuery, state: FSMContext):
     rid = call.data.split("_")[1]
@@ -317,6 +304,7 @@ async def del_rem(call: types.CallbackQuery):
     await call.answer("Видалено")
 
 # --- ІНШІ ХЕНДЛЕРИ ---
+
 @router.message(F.text.in_({"😈 Включити Бидло", "😇 Включити Няшку"}))
 async def toggle_toxic(m: types.Message):
     u = await Database.get_user(m.from_user.id)
@@ -354,6 +342,12 @@ async def location_handler(m: types.Message):
     await Database.update_user(m.from_user.id, lat=m.location.latitude, lon=m.location.longitude)
     await m.answer("📍 Локацію записав.")
 
+@router.message(CommandStart())
+async def start(m: types.Message, state: FSMContext):
+    await state.clear()
+    await Database.get_user(m.from_user.id)
+    await m.answer("Йо. Я на місці.", reply_markup=await get_kb(m.from_user.id))
+
 @router.message(F.text)
 async def text_handler(m: types.Message):
     ignored = ["📋 Список планів", "📍 Погода", "📅 Створити нагадування", 
@@ -364,17 +358,28 @@ async def text_handler(m: types.Message):
 
 async def process_smart(m, text):
     u = await Database.get_user(m.from_user.id)
-    # Прибрали memory_json, бо ai_engine тепер сам бере його з БД
     res = await groq_text_brain(text, m.from_user.id, u[0], u[1], u[2], bool(m.forward_origin))
     
-    if not res: return await m.answer("Еррор.")
-    
-    reply = res.get('reply', '...')
-    if res.get('is_reminder') and res.get('time'):
-        await Database.add_reminder(m.from_user.id, m.chat.id, res['task'], res['time'], res['recurrence'])
-        reply += f"\n⏰ (Нагадування на {res['time']})"
+    if res:
+        reply = res.get('reply', '...')
+        await Database.add_to_context(m.from_user.id, "user", m.text)
+        await Database.add_to_context(m.from_user.id, "assistant", reply)
+        
+        if res.get('save_note'):
+            await Database.add_note(m.from_user.id, res['save_note'])
+            reply += "\n\n✅ (Записав у нотатки)"
 
-    # Зберігаємо контекст у нову таблицю
-    await Database.add_to_context(m.from_user.id, "user", text)
-    await Database.add_to_context(m.from_user.id, "assistant", reply)
-    await m.answer(reply)
+        if res.get('is_reminder') and res.get('time'):
+            await Database.add_reminder(m.from_user.id, m.chat.id, res['task'], res['time'], res['recurrence'])
+            reply += f"\n⏰ (Нагадування на {res['time']})"
+
+        await m.answer(reply)
+
+# --- ЛОВЛЯ ПОМИЛОК ---
+@router.error()
+async def error_handler(event: ErrorEvent):
+    logger.error(f"Critical Error: {event.exception}", exc_info=True)
+    if ADMIN_IDS:
+        try:
+            await event.update.bot.send_message(ADMIN_IDS[0], f"⚠️ **CRITICAL ERROR**\n`{event.exception}`", parse_mode="Markdown")
+        except: pass
