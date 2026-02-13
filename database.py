@@ -1,5 +1,6 @@
 import aiosqlite
 import json
+from datetime import datetime
 from config import DB_NAME
 
 class Database:
@@ -49,4 +50,27 @@ class Database:
     async def add_note(user_id, content, created_at):
         async with aiosqlite.connect(DB_NAME) as db:
             await db.execute("INSERT INTO notes (user_id, content, created_at) VALUES (?,?,?)", (user_id, content, created_at))
+            await db.commit()
+
+    # --- НОВІ ФУНКЦІЇ ДЛЯ СПИСКУ ---
+    @staticmethod
+    async def get_active_reminders(user_id):
+        """Повертає список активних нагадувань, відсортованих за часом"""
+        async with aiosqlite.connect(DB_NAME) as db:
+            # Сортуємо по remind_time ASC (найближчі спочатку)
+            query = "SELECT id, remind_time, remind_text FROM reminders WHERE user_id=? AND status IN ('pending','spamming') ORDER BY remind_time ASC"
+            async with db.execute(query, (user_id,)) as c:
+                return await c.fetchall()
+
+    @staticmethod
+    async def update_reminder_field(rem_id, field, value):
+        """Оновлює текст або час нагадування"""
+        async with aiosqlite.connect(DB_NAME) as db:
+            await db.execute(f"UPDATE reminders SET {field}=? WHERE id=?", (value, rem_id))
+            await db.commit()
+
+    @staticmethod
+    async def delete_reminder(rem_id):
+        async with aiosqlite.connect(DB_NAME) as db:
+            await db.execute("DELETE FROM reminders WHERE id=?", (rem_id,))
             await db.commit()

@@ -1,6 +1,7 @@
-aiogram>=3.0.0
+aiogram
 aiohttp
 aiosqlite
 apscheduler
 python-dotenv
 pytz
+aiogram-calendar
