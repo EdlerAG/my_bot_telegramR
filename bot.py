@@ -10,33 +10,71 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from config import TOKEN, logger, ADMIN_IDS
 from database import Database
 from handlers import router
-from tasks import checker, background_maintenance
+from tasks import checker, background_maintenance, daily_morning_briefing
 
 async def set_commands(bot: Bot):
-    """Меню команд"""
-    user_commands = [
-        BotCommand(command="start", description="Запуск"),
-        BotCommand(command="note", description="Нотатка"),
-        BotCommand(command="search", description="Пошук"),
-        BotCommand(command="report", description="Повідомити про проблему")
+    """Реєстрація команд для різних мов"""
+    
+    # --- УКРАЇНСЬКІ КОМАНДИ ---
+    user_commands_uk = [
+        BotCommand(command="start", description="🚀 Перезапуск бота"),
+        BotCommand(command="settings", description="⚙️ Налаштування (Мова, Режими)"),
+        BotCommand(command="note", description="📝 Додати нотатку"),
+        BotCommand(command="search", description="🔍 Пошук у нотатках"),
+        BotCommand(command="report", description="🆘 Написати адміну"),
     ]
-    await bot.set_my_commands(user_commands, scope=BotCommandScopeDefault())
+    
+    admin_commands_uk = user_commands_uk + [
+        BotCommand(command="stats", description="📊 Статистика сервера"),
+        BotCommand(command="users", description="👥 Список користувачів"),
+        BotCommand(command="ban", description="🚫 Забанити (ID)"),
+        BotCommand(command="unban", description="🕊 Розбанити (ID)"),
+        BotCommand(command="broadcast", description="📢 Розсилка всім"),
+        BotCommand(command="backup", description="📦 Скачати базу даних"),
+        BotCommand(command="all_reminders", description="⏳ Всі активні нагадування"),
+        BotCommand(command="all_notes", description="🕵️ Останні нотатки"),
+        BotCommand(command="db_clean", description="🧹 Очистити старі дані"),
+        BotCommand(command="restart", description="🔄 Перезавантажити бота")
+    ]
 
-    admin_commands = user_commands + [
-        BotCommand(command="stats", description="📊 Статистика"),
-        BotCommand(command="users", description="👥 Юзери"),
-        BotCommand(command="backup", description="📦 Скачати бекап"),
-        BotCommand(command="restart", description="🔄 Перезапуск"),
-        BotCommand(command="broadcast", description="📢 Розсилка"),
-        BotCommand(command="db_clean", description="🧹 Очистка")
+    # --- ENGLISH COMMANDS ---
+    user_commands_en = [
+        BotCommand(command="start", description="🚀 Restart bot"),
+        BotCommand(command="settings", description="⚙️ Settings (Lang, Modes)"),
+        BotCommand(command="note", description="📝 Add note"),
+        BotCommand(command="search", description="🔍 Search notes"),
+        BotCommand(command="report", description="🆘 Contact support"),
     ]
+
+    admin_commands_en = user_commands_en + [
+        BotCommand(command="stats", description="📊 Server Stats"),
+        BotCommand(command="users", description="👥 User List"),
+        BotCommand(command="ban", description="🚫 Ban User (ID)"),
+        BotCommand(command="unban", description="🕊 Unban User (ID)"),
+        BotCommand(command="broadcast", description="📢 Broadcast message"),
+        BotCommand(command="backup", description="📦 Download Database"),
+        BotCommand(command="all_reminders", description="⏳ All active reminders"),
+        BotCommand(command="all_notes", description="🕵️ Recent notes"),
+        BotCommand(command="db_clean", description="🧹 Clean old data"),
+        BotCommand(command="restart", description="🔄 Restart Bot")
+    ]
+
+    # 1. Встановлюємо дефолтні команди (англійська як база)
+    await bot.set_my_commands(user_commands_en, scope=BotCommandScopeDefault())
+    
+    # 2. Встановлюємо спеціально для української мови (language_code='uk')
+    await bot.set_my_commands(user_commands_uk, scope=BotCommandScopeDefault(), language_code='uk')
+
+    # 3. Встановлюємо адмінські команди для кожного адміна
     for admin_id in ADMIN_IDS:
         try:
-            await bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(chat_id=admin_id))
-        except: pass
+            # Для адміна ставимо повний список (можна спробувати визначити мову, але зазвичай адміни знають укр)
+            # Ставимо український варіант як пріоритет для адмінів
+            await bot.set_my_commands(admin_commands_uk, scope=BotCommandScopeChat(chat_id=admin_id))
+        except Exception as e:
+            logger.error(f"Failed to set commands for admin {admin_id}: {e}")
 
 async def main():
-    # --- НАЛАШТУВАННЯ ЛОГУВАННЯ ---
     file_handler = RotatingFileHandler("bot.log", maxBytes=5*1024*1024, backupCount=2, encoding='utf-8')
     formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
     file_handler.setFormatter(formatter)
@@ -45,25 +83,21 @@ async def main():
     root.addHandler(file_handler)
     root.setLevel(logging.INFO)
 
-    # Ініціалізація БД
     await Database.init()
     
-    # Ініціалізація Бота
     bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
     dp = Dispatcher()
-    
-    # Підключаємо роутери
     dp.include_router(router)
     
-    # Встановлюємо меню
+    # Реєструємо команди
     await set_commands(bot)
     
-    # Запускаємо планувальник
     scheduler = AsyncIOScheduler()
     scheduler.add_job(checker, 'interval', seconds=30, args=[bot])
+    # Ранковий бріфінг щодня о 08:00
+    scheduler.add_job(daily_morning_briefing, 'cron', hour=8, minute=0, args=[bot])
     scheduler.start()
     
-    # Запускаємо фонову задачу (передаємо бота для бекапів)
     asyncio.create_task(background_maintenance(bot))
     
     logger.info("🤖 Бот запущено успішно!")

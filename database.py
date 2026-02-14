@@ -1,13 +1,10 @@
 import aiosqlite
-import json
-from datetime import datetime
 from config import DB_NAME
 
 class Database:
     @staticmethod
     async def init():
         async with aiosqlite.connect(DB_NAME) as db:
-            # ОПТИМІЗАЦІЯ: Вмикаємо WAL-режим (швидше, надійніше)
             await db.execute("PRAGMA journal_mode=WAL;")
             
             await db.execute("""
@@ -15,17 +12,26 @@ class Database:
                     id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, chat_id INTEGER, 
                     remind_text TEXT, remind_time TEXT, recurrence TEXT DEFAULT NULL, status TEXT DEFAULT 'pending'
                 )""")
+            
+            # Оновлена структура користувача
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS users (
-                    user_id INTEGER PRIMARY KEY, is_toxic BOOLEAN DEFAULT 0, spam_mode BOOLEAN DEFAULT 0,
-                    lat REAL DEFAULT NULL, lon REAL DEFAULT NULL, memory_json TEXT DEFAULT '[]'
+                    user_id INTEGER PRIMARY KEY, 
+                    is_toxic BOOLEAN DEFAULT 0, 
+                    spam_mode BOOLEAN DEFAULT 0,
+                    lat REAL DEFAULT NULL, 
+                    lon REAL DEFAULT NULL, 
+                    memory_json TEXT DEFAULT '[]',
+                    language TEXT DEFAULT 'uk',
+                    morning_briefing BOOLEAN DEFAULT 1,
+                    is_banned BOOLEAN DEFAULT 0
                 )""")
-            # Таблиця для нотаток (Second Brain)
+                
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS notes (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, content TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )""")
-            # Таблиця для історії діалогу (Context)
+            
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS context (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, role TEXT, content TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -35,10 +41,24 @@ class Database:
     @staticmethod
     async def get_user(user_id):
         async with aiosqlite.connect(DB_NAME) as db:
-            await db.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,))
+            # Створюємо користувача, якщо немає (default language='uk', morning=1)
+            await db.execute("INSERT OR IGNORE INTO users (user_id, language, morning_briefing) VALUES (?, 'uk', 1)", (user_id,))
             await db.commit()
-            async with db.execute("SELECT is_toxic, lat, lon, memory_json, spam_mode FROM users WHERE user_id=?", (user_id,)) as c:
+            
+            # Вибираємо всі поля в чіткому порядку
+            query = """SELECT is_toxic, lat, lon, memory_json, spam_mode, language, morning_briefing, is_banned 
+                       FROM users WHERE user_id=?"""
+            async with db.execute(query, (user_id,)) as c:
                 return await c.fetchone()
+                # Індекси:
+                # 0: is_toxic
+                # 1: lat
+                # 2: lon
+                # 3: memory_json (unused legacy)
+                # 4: spam_mode
+                # 5: language
+                # 6: morning_briefing
+                # 7: is_banned
 
     @staticmethod
     async def update_user(user_id, **kwargs):
@@ -55,7 +75,6 @@ class Database:
                              (user_id, chat_id, text, time, recurrence))
             await db.commit()
 
-    # --- НОТАТКИ ---
     @staticmethod
     async def add_note(user_id, content):
         async with aiosqlite.connect(DB_NAME) as db:
@@ -75,12 +94,10 @@ class Database:
             async with db.execute("SELECT content FROM notes WHERE user_id=? ORDER BY id DESC LIMIT ?", (user_id, limit)) as c:
                 return [row[0] for row in await c.fetchall()]
 
-    # --- КОНТЕКСТ (ПАМ'ЯТЬ) ---
     @staticmethod
     async def add_to_context(user_id, role, content):
         async with aiosqlite.connect(DB_NAME) as db:
             await db.execute("INSERT INTO context (user_id, role, content) VALUES (?,?,?)", (user_id, role, content))
-            # Тримаємо тільки останні 20 повідомлень
             await db.execute("DELETE FROM context WHERE id NOT IN (SELECT id FROM context WHERE user_id=? ORDER BY id DESC LIMIT 20) AND user_id=?", (user_id, user_id))
             await db.commit()
 
@@ -90,7 +107,6 @@ class Database:
             async with db.execute("SELECT role, content FROM context WHERE user_id=? ORDER BY id ASC LIMIT ?", (user_id, limit)) as c:
                 return [{"role": r[0], "content": r[1]} for r in await c.fetchall()]
 
-    # --- ФУНКЦІЇ ДЛЯ СПИСКУ ---
     @staticmethod
     async def get_active_reminders(user_id):
         async with aiosqlite.connect(DB_NAME) as db:
@@ -110,7 +126,6 @@ class Database:
             await db.execute("DELETE FROM reminders WHERE id=?", (rem_id,))
             await db.commit()
 
-    # --- АДМІНКА ТА ОЧИЩЕННЯ ---
     @staticmethod
     async def get_stats():
         async with aiosqlite.connect(DB_NAME) as db:
@@ -126,14 +141,14 @@ class Database:
             if days > 0:
                 await db.execute("DELETE FROM reminders WHERE status != 'pending' AND remind_time < datetime('now', ?)", (f'-{days} days',))
             else:
-                # Повне очищення виконаних
                 await db.execute("DELETE FROM reminders WHERE status != 'pending'")
             await db.commit()
 
     @staticmethod
     async def get_all_users():
         async with aiosqlite.connect(DB_NAME) as db:
-            async with db.execute("SELECT user_id, is_toxic FROM users") as c:
+            # Оновлено, щоб брати всі потрібні поля
+            async with db.execute("SELECT user_id, is_toxic, lat, lon, spam_mode, language, morning_briefing FROM users") as c:
                 return await c.fetchall()
 
     @staticmethod
