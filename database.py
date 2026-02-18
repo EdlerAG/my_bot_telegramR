@@ -36,7 +36,9 @@ class Database:
                     memory_json TEXT DEFAULT '[]',
                     language TEXT DEFAULT 'uk',
                     morning_briefing BOOLEAN DEFAULT 1,
-                    is_banned BOOLEAN DEFAULT 0
+                    is_banned BOOLEAN DEFAULT 0,
+                    show_done_plans BOOLEAN DEFAULT 1,
+                    history_days INTEGER DEFAULT 1
                 )""")
             await Database._ensure_column(db, "users", "spam_mode", "BOOLEAN DEFAULT 0")
             await Database._ensure_column(db, "users", "lat", "REAL DEFAULT NULL")
@@ -45,6 +47,8 @@ class Database:
             await Database._ensure_column(db, "users", "language", "TEXT DEFAULT 'uk'")
             await Database._ensure_column(db, "users", "morning_briefing", "BOOLEAN DEFAULT 1")
             await Database._ensure_column(db, "users", "is_banned", "BOOLEAN DEFAULT 0")
+            await Database._ensure_column(db, "users", "show_done_plans", "BOOLEAN DEFAULT 1")
+            await Database._ensure_column(db, "users", "history_days", "INTEGER DEFAULT 1")
                 
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS notes (
@@ -69,7 +73,7 @@ class Database:
             await db.commit()
             
             # Вибираємо всі поля в чіткому порядку
-            query = """SELECT is_toxic, lat, lon, memory_json, spam_mode, language, morning_briefing, is_banned 
+            query = """SELECT is_toxic, lat, lon, memory_json, spam_mode, language, morning_briefing, is_banned, show_done_plans, history_days 
                        FROM users WHERE user_id=?"""
             async with db.execute(query, (user_id,)) as c:
                 return await c.fetchone()
@@ -82,6 +86,8 @@ class Database:
                 # 5: language
                 # 6: morning_briefing
                 # 7: is_banned
+                # 8: show_done_plans
+                # 9: history_days
 
     @staticmethod
     async def update_user(user_id, **kwargs):
@@ -162,9 +168,41 @@ class Database:
     @staticmethod
     async def get_active_reminders(user_id):
         async with aiosqlite.connect(DB_NAME, timeout=30) as db:
-            query = "SELECT id, remind_time, remind_text FROM reminders WHERE user_id=? AND status IN ('pending','spamming') ORDER BY remind_time ASC"
+            query = "SELECT id, remind_time, remind_text FROM reminders WHERE user_id=? AND status IN ('pending','spamming','awaiting_confirm') ORDER BY remind_time ASC"
             async with db.execute(query, (user_id,)) as c:
                 return await c.fetchall()
+
+    @staticmethod
+    async def get_reminders_history(user_id, start_dt, end_dt, include_done=True):
+        async with aiosqlite.connect(DB_NAME, timeout=30) as db:
+            if include_done:
+                query = """
+                    SELECT id, remind_time, remind_text, status
+                    FROM reminders
+                    WHERE user_id=? AND remind_time BETWEEN ? AND ?
+                    ORDER BY remind_time ASC
+                """
+                params = (user_id, start_dt, end_dt)
+            else:
+                query = """
+                    SELECT id, remind_time, remind_text, status
+                    FROM reminders
+                    WHERE user_id=? AND remind_time BETWEEN ? AND ?
+                      AND status IN ('pending','spamming','awaiting_confirm')
+                    ORDER BY remind_time ASC
+                """
+                params = (user_id, start_dt, end_dt)
+            async with db.execute(query, params) as c:
+                return await c.fetchall()
+
+    @staticmethod
+    async def get_reminder_details(rem_id):
+        async with aiosqlite.connect(DB_NAME, timeout=30) as db:
+            async with db.execute(
+                "SELECT id, user_id, remind_time, recurrence, status FROM reminders WHERE id=?",
+                (rem_id,),
+            ) as c:
+                return await c.fetchone()
 
     @staticmethod
     async def update_reminder_field(rem_id, field, value):
