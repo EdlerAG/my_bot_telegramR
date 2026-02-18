@@ -17,8 +17,7 @@ async def checker(bot: Bot):
         now_str = now.strftime("%Y-%m-%d %H:%M:%S")
         spam_cutoff = (now - timedelta(seconds=60)).strftime("%Y-%m-%d %H:%M:%S")
 
-        async with aiosqlite.connect(DB_NAME, timeout=30) as db:
-            await db.execute("PRAGMA busy_timeout=5000")
+        async with aiosqlite.connect(DB_NAME) as db:
             query = """SELECT id, chat_id, remind_text, user_id, status, recurrence, remind_time, last_spam_sent_at
                        FROM reminders
                        WHERE (status='pending' AND remind_time <= ?)
@@ -26,25 +25,18 @@ async def checker(bot: Bot):
             async with db.execute(query, (now_str, spam_cutoff)) as c:
                 rows = await c.fetchall()
 
-        for r in rows:
-            rid, chat_id, text, user_id, status, recurrence, r_time, _ = r
-            user = await Database.get_user(user_id)
-            is_toxic, spam_mode, lang, is_banned = user[0], user[4], user[5], user[7]
-            if is_banned:
-                continue
+            for r in rows:
+                rid, chat_id, text, user_id, status, recurrence, r_time, _last_spam_sent = r
+                user = await Database.get_user(user_id)
+                # user: 0=toxic, 4=spam, 5=lang, 6=morning, 7=banned
+                is_toxic, spam_mode, is_banned = user[0], user[4], user[7]
 
-            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=t("done_btn", lang), callback_data=f"confirm_{rid}")]])
-
-            if spam_mode:
-                msg = f"🤬 РОБИ ДАВАЙ: {text}" if is_toxic else f"{t('rem_prefix', lang)} {text}"
-                try:
-                    await bot.send_message(chat_id, msg, reply_markup=kb)
-                except Exception as e:
-                    logger.error(f"Send error: {e}")
+                if is_banned:
                     continue
 
-                async with aiosqlite.connect(DB_NAME, timeout=30) as db:
-                    await db.execute("PRAGMA busy_timeout=5000")
+                kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Done", callback_data=f"confirm_{rid}")]])
+
+                if spam_mode:
                     if status == 'pending':
                         await db.execute(
                             "UPDATE reminders SET status='spamming', last_spam_sent_at=? WHERE id=?",
@@ -52,17 +44,21 @@ async def checker(bot: Bot):
                         )
                     else:
                         await db.execute("UPDATE reminders SET last_spam_sent_at=? WHERE id=?", (now_str, rid))
-                    await db.commit()
-                continue
 
-            try:
-                await bot.send_message(chat_id, f"{t('rem_prefix', lang)} {text}")
-            except Exception as e:
-                logger.error(f"Send error: {e}")
-                continue
+                    msg = f"🤬 РОБИ ДАВАЙ: {text}" if is_toxic else f"🔔 Reminder: {text}"
+                    try:
+                        await bot.send_message(chat_id, msg, reply_markup=kb)
+                    except Exception as e:
+                        logger.error(f"Send error: {e}")
+                    continue
 
-            async with aiosqlite.connect(DB_NAME, timeout=30) as db:
-                await db.execute("PRAGMA busy_timeout=5000")
+                # Якщо spam_mode вимкнений, то нагадування повинно відпрацювати лише один раз
+                prefix = "🔔"
+                try:
+                    await bot.send_message(chat_id, f"{prefix} {text}")
+                except Exception as e:
+                    logger.error(f"Send error: {e}")
+
                 if recurrence == 'daily':
                     try:
                         old_time = datetime.strptime(r_time, "%Y-%m-%d %H:%M:%S")
@@ -75,7 +71,8 @@ async def checker(bot: Bot):
                         await db.execute("UPDATE reminders SET status='fired', last_spam_sent_at=NULL WHERE id=?", (rid,))
                 else:
                     await db.execute("UPDATE reminders SET status='fired', last_spam_sent_at=NULL WHERE id=?", (rid,))
-                await db.commit()
+
+            await db.commit()
     except Exception as e:
         logger.error(f"Task error: {e}")
 

@@ -457,15 +457,15 @@ async def _do_notes_search(m: types.Message, query: str, lang: str):
         empty = await m.answer(t("search_empty", lang))
         schedule_delete(empty)
         return
-    msg = t("found_title", lang) + "\n\n" + "\n".join([f"🔹 {n[0]}" for n in res])
+    msg = "<b>🔎 Found:</b>\n\n" + "\n".join([f"🔹 {n[0]}" for n in res])
     found = await m.answer(msg, parse_mode="HTML")
     schedule_delete(found, delay=45)
     await safe_delete_message(m)
 
-def notes_list_kb(note_id: int, lang: str):
+def notes_list_kb(note_id: int):
     return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text=t("edit_text_btn", lang), callback_data=f"note_edit_{note_id}"),
-        InlineKeyboardButton(text="🗑", callback_data=f"note_del_{note_id}")
+        InlineKeyboardButton(text="✏️ Edit", callback_data=f"note_edit_{note_id}"),
+        InlineKeyboardButton(text="🗑 Delete", callback_data=f"note_del_{note_id}")
     ]])
 
 @router.message(F.text.in_({"📚 Мої нотатки", "📚 My Notes"}))
@@ -481,7 +481,7 @@ async def my_notes_handler(m: types.Message):
     await m.answer(t("notes_title", u[5]), parse_mode="HTML")
     for note_id, content, created_at in notes:
         short = content if len(content) < 180 else content[:177] + "..."
-        await m.answer(f"🗒 <b>{created_at}</b>\n{short}", parse_mode="HTML", reply_markup=notes_list_kb(note_id, u[5]))
+        await m.answer(f"🗒 <b>{created_at}</b>\n{short}", parse_mode="HTML", reply_markup=notes_list_kb(note_id))
 
 @router.callback_query(F.data.startswith("note_del_"))
 async def note_delete_handler(call: types.CallbackQuery):
@@ -496,13 +496,11 @@ async def note_edit_start(call: types.CallbackQuery, state: FSMContext):
     note_id = int(call.data.split("_")[-1])
     note = await Database.get_note_by_id(call.from_user.id, note_id)
     if not note:
-        u = await Database.get_user(call.from_user.id)
-        await call.answer(t("not_found", u[5]), show_alert=True)
+        await call.answer("Not found", show_alert=True)
         return
     await state.set_state(NoteFSM.waiting_for_note_edit_text)
     await state.update_data(edit_note_id=note_id)
-    u = await Database.get_user(call.from_user.id)
-    await call.message.answer(t("ask_note_edit_text", u[5]))
+    await call.message.answer("✏️ Надішли новий текст нотатки")
     await call.answer()
 
 @router.message(StateFilter(NoteFSM.waiting_for_note_edit_text))
@@ -630,7 +628,7 @@ async def save_new_text(m: types.Message, state: FSMContext):
     u = await Database.get_user(m.from_user.id)
     data = await state.get_data()
     await Database.update_reminder_field(data['edit_id'], "remind_text", m.text)
-    done = await m.answer(t("updated_ok", u[5]), reply_markup=await get_kb(m.from_user.id))
+    done = await m.answer("✅ Updated!", reply_markup=await get_kb(m.from_user.id))
     schedule_delete(done)
     await safe_delete_message(m)
     await state.clear()
@@ -662,7 +660,7 @@ async def save_new_time(message, time_val, state, user_id):
     data = await state.get_data()
     full_dt = f"{data['new_date']} {time_val}:00"
     await Database.update_reminder_field(data['edit_id'], "remind_time", full_dt)
-    done = await message.answer(f"{t('updated_ok', u[5])} {full_dt}", reply_markup=await get_kb(user_id))
+    done = await message.answer(f"✅ {full_dt}", reply_markup=await get_kb(message.chat.id))
     schedule_delete(done)
     await state.clear()
 
