@@ -26,6 +26,9 @@ def sanitize_ai_reply(text: str, lang: str) -> str:
     return cleaned
 
 async def groq_transcribe(file_path, lang="uk"):
+    if not GROQ_KEY:
+        return ""
+
     url = "https://api.groq.com/openai/v1/audio/transcriptions"
     try:
         with open(file_path, 'rb') as f:
@@ -40,6 +43,9 @@ async def groq_transcribe(file_path, lang="uk"):
         return ""
 
 async def groq_analyze_image(text_prompt, image_path, is_toxic, lang="uk"):
+    if not GROQ_KEY:
+        return "AI недоступний: відсутній GROQ_API_KEY." if lang == "uk" else "AI is unavailable: missing GROQ_API_KEY."
+
     with open(image_path, "rb") as f:
         encoded = base64.b64encode(f.read()).decode('utf-8')
     
@@ -61,6 +67,9 @@ async def groq_analyze_image(text_prompt, image_path, is_toxic, lang="uk"):
     except: return "Error analyzing image."
 
 async def groq_summarize_video(video_id, lang="uk"):
+    if not GROQ_KEY:
+        return None
+
     transcript = await get_video_transcript(video_id, lang)
     if not transcript:
         return None
@@ -93,6 +102,17 @@ async def groq_summarize_video(video_id, lang="uk"):
         return None
 
 async def groq_text_brain(text, user_id, is_toxic, lat, lon, lang="uk", is_forwarded=False):
+    if not GROQ_KEY:
+        fallback = "Вибач, AI-модуль тимчасово недоступний (нема GROQ_API_KEY)." if lang == "uk" else "Sorry, AI module is temporarily unavailable (missing GROQ_API_KEY)."
+        return {
+            "is_reminder": False,
+            "task": None,
+            "time": None,
+            "recurrence": None,
+            "save_note": None,
+            "reply": fallback,
+        }
+
     from database import Database
     
     notes = await Database.get_recent_notes(user_id)

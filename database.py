@@ -3,6 +3,13 @@ from config import DB_NAME
 
 class Database:
     @staticmethod
+    async def _ensure_column(db, table_name, column_name, sql_definition):
+        async with db.execute(f"PRAGMA table_info({table_name})") as c:
+            cols = {row[1] for row in await c.fetchall()}
+        if column_name not in cols:
+            await db.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {sql_definition}")
+
+    @staticmethod
     async def init():
         async with aiosqlite.connect(DB_NAME, timeout=30) as db:
             await db.execute("PRAGMA journal_mode=WAL;")
@@ -13,11 +20,10 @@ class Database:
                     remind_text TEXT, remind_time TEXT, recurrence TEXT DEFAULT NULL, status TEXT DEFAULT 'pending',
                     last_spam_sent_at TEXT DEFAULT NULL
                 )""")
-
-            async with db.execute("PRAGMA table_info(reminders)") as c:
-                reminder_cols = {row[1] for row in await c.fetchall()}
-            if "last_spam_sent_at" not in reminder_cols:
-                await db.execute("ALTER TABLE reminders ADD COLUMN last_spam_sent_at TEXT DEFAULT NULL")
+            await Database._ensure_column(db, "reminders", "chat_id", "INTEGER")
+            await Database._ensure_column(db, "reminders", "recurrence", "TEXT DEFAULT NULL")
+            await Database._ensure_column(db, "reminders", "status", "TEXT DEFAULT 'pending'")
+            await Database._ensure_column(db, "reminders", "last_spam_sent_at", "TEXT DEFAULT NULL")
             
             # Оновлена структура користувача
             await db.execute("""
@@ -32,6 +38,13 @@ class Database:
                     morning_briefing BOOLEAN DEFAULT 1,
                     is_banned BOOLEAN DEFAULT 0
                 )""")
+            await Database._ensure_column(db, "users", "spam_mode", "BOOLEAN DEFAULT 0")
+            await Database._ensure_column(db, "users", "lat", "REAL DEFAULT NULL")
+            await Database._ensure_column(db, "users", "lon", "REAL DEFAULT NULL")
+            await Database._ensure_column(db, "users", "memory_json", "TEXT DEFAULT '[]'")
+            await Database._ensure_column(db, "users", "language", "TEXT DEFAULT 'uk'")
+            await Database._ensure_column(db, "users", "morning_briefing", "BOOLEAN DEFAULT 1")
+            await Database._ensure_column(db, "users", "is_banned", "BOOLEAN DEFAULT 0")
                 
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS notes (
