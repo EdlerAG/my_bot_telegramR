@@ -571,6 +571,7 @@ async def step_text_saved(m: types.Message, state: FSMContext):
 
 @router.callback_query(SimpleCalendarCallback.filter(), StateFilter(ReminderFSM.waiting_for_date))
 async def process_calendar(callback: types.CallbackQuery, callback_data: dict, state: FSMContext):
+    await safe_callback_answer(callback)
     calendar = SimpleCalendar()
     selected, date = await calendar.process_selection(callback, callback_data)
     if selected:
@@ -598,8 +599,13 @@ async def finalize_reminder(message: types.Message, time_str: str, state: FSMCon
     data = await state.get_data()
     u = await Database.get_user(user_id)
     full_datetime = f"{data['remind_date']} {time_str}:00"
+    pretty_datetime = f"{data['remind_date']} {time_str}"
     await Database.add_reminder(user_id, message.chat.id, data['remind_text'], full_datetime, recurrence=None)
-    done = await message.answer(f"{t('rem_created', u[5])}\n📌 {data['remind_text']}\n⏰ {full_datetime}", reply_markup=await get_kb(user_id))
+    done = await message.answer(
+        f"{t('rem_created', u[5])}\n📌 {data['remind_text']}\n⏰ {pretty_datetime}",
+        reply_markup=await get_kb(user_id),
+        parse_mode="HTML",
+    )
     schedule_delete(done, delay=20)
     await state.clear()
 
@@ -670,6 +676,7 @@ async def save_new_text(m: types.Message, state: FSMContext):
 
 @router.callback_query(SimpleCalendarCallback.filter(), StateFilter(EditFSM.editing_date))
 async def edit_date_process(callback: types.CallbackQuery, callback_data: dict, state: FSMContext):
+    await safe_callback_answer(callback)
     calendar = SimpleCalendar()
     selected, date = await calendar.process_selection(callback, callback_data)
     if selected:

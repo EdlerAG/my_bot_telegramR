@@ -11,92 +11,143 @@ from database import Database
 from utils import create_backup, get_weather
 from locales import t
 
+
+async def _apply_updates_with_retry(updates, retries: int = 4, base_delay: float = 0.25):
+    """Коротка пакетна фаза запису з retry при SQLite lock."""
+    if not updates:
+        return
+
+    for attempt in range(retries):
+        try:
+            async with aiosqlite.connect(DB_NAME, timeout=15) as db:
+                await db.execute("PRAGMA busy_timeout = 15000")
+                for sql, params in updates:
+                    await db.execute(sql, params)
+                await db.commit()
+            return
+        except aiosqlite.OperationalError as e:
+            if "database is locked" not in str(e).lower() or attempt == retries - 1:
+                raise
+            await asyncio.sleep(base_delay * (attempt + 1))
+
+
 async def checker(bot: Bot):
+    """
+    Перевіряє нагадування без довгого утримання SQLite-lock.
+    1) Швидко читає due-нагадування.
+    2) Відпрацьовує Telegram-send поза транзакцією БД.
+    3) Пакетно оновлює статуси в БД.
+    """
     try:
         now = datetime.now(pytz.timezone(TIMEZONE))
         now_str = now.strftime("%Y-%m-%d %H:%M:%S")
         spam_cutoff = (now - timedelta(seconds=60)).strftime("%Y-%m-%d %H:%M:%S")
 
-        async with aiosqlite.connect(DB_NAME) as db:
-            query = """SELECT id, chat_id, remind_text, user_id, status, recurrence, remind_time, last_spam_sent_at
-                       FROM reminders
-                       WHERE (status='pending' AND remind_time <= ?)
-                          OR (status='spamming' AND (last_spam_sent_at IS NULL OR last_spam_sent_at <= ?))"""
+        async with aiosqlite.connect(DB_NAME, timeout=15) as db:
+            await db.execute("PRAGMA busy_timeout = 15000")
+            query = """
+                SELECT
+                    r.id, r.chat_id, r.remind_text, r.user_id, r.status, r.recurrence, r.remind_time,
+                    u.is_toxic, u.spam_mode, u.language, u.is_banned
+                FROM reminders r
+                LEFT JOIN users u ON u.user_id = r.user_id
+                WHERE (r.status='pending' AND r.remind_time <= ?)
+                   OR (r.status='spamming' AND (r.last_spam_sent_at IS NULL OR r.last_spam_sent_at <= ?))
+            """
             async with db.execute(query, (now_str, spam_cutoff)) as c:
                 rows = await c.fetchall()
 
-            for r in rows:
-                rid, chat_id, text, user_id, status, recurrence, r_time, _last_spam_sent = r
-                user = await Database.get_user(user_id)
-                # user: 0=toxic, 4=spam, 5=lang, 6=morning, 7=banned
-                is_toxic, spam_mode, is_banned = user[0], user[4], user[7]
+        if not rows:
+            return
 
-                if is_banned:
-                    continue
+        updates: list[tuple[str, tuple]] = []
 
-                kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Done", callback_data=f"confirm_{rid}")]])
+        for r in rows:
+            rid, chat_id, text, _user_id, status, recurrence, r_time, is_toxic, spam_mode, lang, is_banned = r
 
-                if spam_mode:
-                    if status == 'pending':
-                        await db.execute(
-                            "UPDATE reminders SET status='spamming', last_spam_sent_at=? WHERE id=?",
-                            (now_str, rid)
-                        )
-                    else:
-                        await db.execute("UPDATE reminders SET last_spam_sent_at=? WHERE id=?", (now_str, rid))
+            # Дефолти, якщо запису users немає (legacy reminders)
+            is_toxic = bool(is_toxic) if is_toxic is not None else False
+            spam_mode = bool(spam_mode) if spam_mode is not None else False
+            lang = lang if lang in ("uk", "en") else "uk"
+            is_banned = bool(is_banned) if is_banned is not None else False
 
-                    msg = f"🤬 РОБИ ДАВАЙ: {text}" if is_toxic else f"🔔 Reminder: {text}"
-                    try:
-                        await bot.send_message(chat_id, msg, reply_markup=kb)
-                    except Exception as e:
-                        logger.error(f"Send error: {e}")
-                    continue
+            if is_banned:
+                continue
 
-                # Якщо spam_mode вимкнений, то нагадування повинно відпрацювати лише один раз
-                prefix = "🔔"
+            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Done", callback_data=f"confirm_{rid}")]])
+
+            if spam_mode:
+                msg = (
+                    f"🤬 РОБИ ДАВАЙ: {text}" if is_toxic else
+                    (f"🔔 Нагадування: {text}" if lang == "uk" else f"🔔 Reminder: {text}")
+                )
                 try:
-                    await bot.send_message(chat_id, f"{prefix} {text}")
+                    await bot.send_message(chat_id, msg, reply_markup=kb)
+                    if status == 'pending':
+                        updates.append((
+                            "UPDATE reminders SET status='spamming', last_spam_sent_at=? WHERE id=?",
+                            (now_str, rid),
+                        ))
+                    else:
+                        updates.append((
+                            "UPDATE reminders SET last_spam_sent_at=? WHERE id=?",
+                            (now_str, rid),
+                        ))
                 except Exception as e:
                     logger.error(f"Send error: {e}")
+                continue
 
+            # Якщо spam_mode вимкнений, нагадування відправляється один раз (або рескейлиться для daily)
+            msg = f"🔔 {'Нагадування' if lang == 'uk' else 'Reminder'}: {text}"
+            try:
+                await bot.send_message(chat_id, msg)
                 if recurrence == 'daily':
                     try:
                         old_time = datetime.strptime(r_time, "%Y-%m-%d %H:%M:%S")
                         new_time = (old_time + timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
-                        await db.execute(
+                        updates.append((
                             "UPDATE reminders SET remind_time=?, status='pending', last_spam_sent_at=NULL WHERE id=?",
-                            (new_time, rid)
-                        )
+                            (new_time, rid),
+                        ))
                     except Exception:
-                        await db.execute("UPDATE reminders SET status='fired', last_spam_sent_at=NULL WHERE id=?", (rid,))
+                        updates.append((
+                            "UPDATE reminders SET status='fired', last_spam_sent_at=NULL WHERE id=?",
+                            (rid,),
+                        ))
                 else:
-                    await db.execute("UPDATE reminders SET status='fired', last_spam_sent_at=NULL WHERE id=?", (rid,))
+                    updates.append((
+                        "UPDATE reminders SET status='fired', last_spam_sent_at=NULL WHERE id=?",
+                        (rid,),
+                    ))
+            except Exception as e:
+                logger.error(f"Send error: {e}")
 
-            await db.commit()
+        await _apply_updates_with_retry(updates)
     except Exception as e:
         logger.error(f"Task error: {e}")
 
 
 async def daily_morning_briefing(bot: Bot):
     """Розсилає ранкове повідомлення тим, у кого воно включено"""
-    users = await Database.get_all_users() # (user_id, is_toxic, lat, lon, spam_mode, language, morning_briefing)
-    
+    users = await Database.get_all_users()  # (user_id, is_toxic, lat, lon, spam_mode, language, morning_briefing)
+
     for user_data in users:
         user_id = user_data[0]
         lang = user_data[5]
         morning_enabled = user_data[6]
-        
+
         # Перевірка налаштування
-        if not morning_enabled: continue
+        if not morning_enabled:
+            continue
 
         lat, lon = user_data[2], user_data[3]
-        
+
         w_text = ""
         if lat and lon:
             w = await get_weather(lat, lon)
             if w:
                 w_text = f"{t('morning_weather', lang)} {w['temp']}°C, ☔ {w['rain']}%\n"
-        
+
         async with aiosqlite.connect(DB_NAME, timeout=30) as db:
             now = datetime.now(pytz.timezone(TIMEZONE))
             today_start = now.strftime("%Y-%m-%d 00:00:00")
@@ -104,7 +155,7 @@ async def daily_morning_briefing(bot: Bot):
             query = "SELECT remind_text, remind_time FROM reminders WHERE user_id=? AND remind_time BETWEEN ? AND ? AND status='pending'"
             async with db.execute(query, (user_id, today_start, today_end)) as c:
                 plans = await c.fetchall()
-        
+
         plans_text = ""
         if plans:
             plans_text = t("morning_plans", lang)
@@ -122,11 +173,13 @@ async def daily_morning_briefing(bot: Bot):
                 quote_text = f"\n{t('morning_quote', lang)}<i>\"{random_note[:100]}...\"</i>"
 
         msg = f"{t('morning_title', lang)}{w_text}\n{plans_text}{quote_text}"
-        
+
         try:
             await bot.send_message(user_id, msg, parse_mode="HTML")
             await asyncio.sleep(0.1)
-        except: pass
+        except:
+            pass
+
 
 async def background_maintenance(bot: Bot):
     days_counter = 0
@@ -139,7 +192,8 @@ async def background_maintenance(bot: Bot):
                     try:
                         await bot.send_document(ADMIN_IDS[0], FSInputFile(backup_path), caption="📦 Auto Backup")
                         os.remove(backup_path)
-                    except: pass
+                    except:
+                        pass
             days_counter += 1
             await asyncio.sleep(86400)
         except Exception as e:
