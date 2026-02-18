@@ -25,7 +25,9 @@ async def set_commands(bot: Bot):
     ]
     
     admin_commands_uk = user_commands_uk + [
+        BotCommand(command="cancel", description="🛑 Скасувати поточну дію"),
         BotCommand(command="stats", description="📊 Статистика сервера"),
+        BotCommand(command="db_status", description="🗄 Статус reminders БД"),
         BotCommand(command="users", description="👥 Список користувачів"),
         BotCommand(command="ban", description="🚫 Забанити (ID)"),
         BotCommand(command="unban", description="🕊 Розбанити (ID)"),
@@ -47,7 +49,9 @@ async def set_commands(bot: Bot):
     ]
 
     admin_commands_en = user_commands_en + [
+        BotCommand(command="cancel", description="🛑 Cancel current action"),
         BotCommand(command="stats", description="📊 Server Stats"),
+        BotCommand(command="db_status", description="🗄 Reminders DB status"),
         BotCommand(command="users", description="👥 User List"),
         BotCommand(command="ban", description="🚫 Ban User (ID)"),
         BotCommand(command="unban", description="🕊 Unban User (ID)"),
@@ -93,7 +97,7 @@ async def main():
     await set_commands(bot)
     
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(checker, 'interval', seconds=30, args=[bot])
+    scheduler.add_job(checker, 'interval', seconds=30, args=[bot], max_instances=1, coalesce=True)
     # Ранковий бріфінг щодня о 08:00
     scheduler.add_job(daily_morning_briefing, 'cron', hour=8, minute=0, args=[bot])
     scheduler.start()

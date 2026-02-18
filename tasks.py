@@ -97,7 +97,7 @@ async def daily_morning_briefing(bot: Bot):
             if w:
                 w_text = f"{t('morning_weather', lang)} {w['temp']}°C, ☔ {w['rain']}%\n"
         
-        async with aiosqlite.connect(DB_NAME) as db:
+        async with aiosqlite.connect(DB_NAME, timeout=30) as db:
             now = datetime.now(pytz.timezone(TIMEZONE))
             today_start = now.strftime("%Y-%m-%d 00:00:00")
             today_end = now.strftime("%Y-%m-%d 23:59:59")
