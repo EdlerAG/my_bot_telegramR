@@ -15,49 +15,70 @@ async def checker(bot: Bot):
     try:
         now = datetime.now(pytz.timezone(TIMEZONE))
         now_str = now.strftime("%Y-%m-%d %H:%M:%S")
-        
-        async with aiosqlite.connect(DB_NAME) as db:
-            query = """SELECT id, chat_id, remind_text, user_id, status, recurrence, remind_time 
-                       FROM reminders WHERE (status='pending' AND remind_time <= ?) OR status='spamming'"""
-            async with db.execute(query, (now_str,)) as c:
-                rows = await c.fetchall()
-                
-            for r in rows:
-                rid, chat_id, text, user_id, status, recurrence, r_time = r
-                user = await Database.get_user(user_id)
-                # user: 0=toxic, 4=spam, 5=lang, 6=morning, 7=banned
-                is_toxic, spam_mode, is_banned = user[0], user[4], user[7]
-                
-                if is_banned: continue 
+        spam_cutoff = (now - timedelta(seconds=60)).strftime("%Y-%m-%d %H:%M:%S")
 
-                kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Done", callback_data=f"confirm_{rid}")]])
-                
-                if spam_mode:
+        async with aiosqlite.connect(DB_NAME, timeout=30) as db:
+            await db.execute("PRAGMA busy_timeout=5000")
+            query = """SELECT id, chat_id, remind_text, user_id, status, recurrence, remind_time, last_spam_sent_at
+                       FROM reminders
+                       WHERE (status='pending' AND remind_time <= ?)
+                          OR (status='spamming' AND (last_spam_sent_at IS NULL OR last_spam_sent_at <= ?))"""
+            async with db.execute(query, (now_str, spam_cutoff)) as c:
+                rows = await c.fetchall()
+
+        for r in rows:
+            rid, chat_id, text, user_id, status, recurrence, r_time, _ = r
+            user = await Database.get_user(user_id)
+            is_toxic, spam_mode, lang, is_banned = user[0], user[4], user[5], user[7]
+            if is_banned:
+                continue
+
+            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=t("done_btn", lang), callback_data=f"confirm_{rid}")]])
+
+            if spam_mode:
+                msg = f"🤬 РОБИ ДАВАЙ: {text}" if is_toxic else f"{t('rem_prefix', lang)} {text}"
+                try:
+                    await bot.send_message(chat_id, msg, reply_markup=kb)
+                except Exception as e:
+                    logger.error(f"Send error: {e}")
+                    continue
+
+                async with aiosqlite.connect(DB_NAME, timeout=30) as db:
+                    await db.execute("PRAGMA busy_timeout=5000")
                     if status == 'pending':
-                        await db.execute("UPDATE reminders SET status='spamming' WHERE id=?", (rid,))
-                    msg = f"🤬 РОБИ ДАВАЙ: {text}" if is_toxic else f"🔔 Reminder: {text}"
-                    try: await bot.send_message(chat_id, msg, reply_markup=kb)
-                    except Exception as e: logger.error(f"Send error: {e}")
-                
+                        await db.execute(
+                            "UPDATE reminders SET status='spamming', last_spam_sent_at=? WHERE id=?",
+                            (now_str, rid)
+                        )
+                    else:
+                        await db.execute("UPDATE reminders SET last_spam_sent_at=? WHERE id=?", (now_str, rid))
+                    await db.commit()
+                continue
+
+            try:
+                await bot.send_message(chat_id, f"{t('rem_prefix', lang)} {text}")
+            except Exception as e:
+                logger.error(f"Send error: {e}")
+                continue
+
+            async with aiosqlite.connect(DB_NAME, timeout=30) as db:
+                await db.execute("PRAGMA busy_timeout=5000")
+                if recurrence == 'daily':
+                    try:
+                        old_time = datetime.strptime(r_time, "%Y-%m-%d %H:%M:%S")
+                        new_time = (old_time + timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
+                        await db.execute(
+                            "UPDATE reminders SET remind_time=?, status='pending', last_spam_sent_at=NULL WHERE id=?",
+                            (new_time, rid)
+                        )
+                    except Exception:
+                        await db.execute("UPDATE reminders SET status='fired', last_spam_sent_at=NULL WHERE id=?", (rid,))
                 else:
-                    if status == 'pending':
-                        prefix = "🔔" 
-                        try: await bot.send_message(chat_id, f"{prefix} {text}")
-                        except: pass
-                        
-                        if recurrence == 'daily':
-                            try:
-                                old_time = datetime.strptime(r_time, "%Y-%m-%d %H:%M:%S")
-                                new_time = (old_time + timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
-                                await db.execute("UPDATE reminders SET remind_time=?, status='pending' WHERE id=?", (new_time, rid))
-                            except:
-                                await db.execute("UPDATE reminders SET status='fired' WHERE id=?", (rid,))
-                        else:
-                            await db.execute("UPDATE reminders SET status='fired' WHERE id=?", (rid,))
-            
-            await db.commit()
+                    await db.execute("UPDATE reminders SET status='fired', last_spam_sent_at=NULL WHERE id=?", (rid,))
+                await db.commit()
     except Exception as e:
         logger.error(f"Task error: {e}")
+
 
 async def daily_morning_briefing(bot: Bot):
     """Розсилає ранкове повідомлення тим, у кого воно включено"""
@@ -79,7 +100,7 @@ async def daily_morning_briefing(bot: Bot):
             if w:
                 w_text = f"{t('morning_weather', lang)} {w['temp']}°C, ☔ {w['rain']}%\n"
         
-        async with aiosqlite.connect(DB_NAME) as db:
+        async with aiosqlite.connect(DB_NAME, timeout=30) as db:
             now = datetime.now(pytz.timezone(TIMEZONE))
             today_start = now.strftime("%Y-%m-%d 00:00:00")
             today_end = now.strftime("%Y-%m-%d 23:59:59")

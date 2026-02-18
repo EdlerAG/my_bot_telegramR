@@ -38,6 +38,24 @@ class EditFSM(StatesGroup):
     editing_date = State()
     editing_time = State()
 
+class NoteFSM(StatesGroup):
+    waiting_for_note = State()
+    waiting_for_search_query = State()
+    waiting_for_note_edit_text = State()
+
+async def safe_delete_message(msg: types.Message):
+    try:
+        await msg.delete()
+    except Exception:
+        pass
+
+async def delete_later(msg: types.Message, delay: int = 12):
+    await asyncio.sleep(delay)
+    await safe_delete_message(msg)
+
+def schedule_delete(msg: types.Message, delay: int = 12):
+    asyncio.create_task(delete_later(msg, delay))
+
 # --- ПЕРЕВІРКА НА БАН ---
 async def is_banned(user_id):
     u = await Database.get_user(user_id)
@@ -49,6 +67,8 @@ async def get_kb(user_id):
     lang = u[5]
     kb = [
         [KeyboardButton(text=t("btn_create_rem", lang)), KeyboardButton(text=t("btn_list_rem", lang))],
+        [KeyboardButton(text=t("btn_add_note", lang)), KeyboardButton(text=t("btn_my_notes", lang))],
+        [KeyboardButton(text=t("btn_search_notes", lang))],
         [KeyboardButton(text=t("btn_weather", lang), request_location=True)],
         [KeyboardButton(text=t("btn_settings", lang))]
     ]
@@ -302,36 +322,150 @@ async def youtube_handler(m: types.Message):
 # --- REMINDERS & NOTES ---
 
 @router.message(Command("note"))
-async def add_note_handler(m: types.Message):
+@router.message(F.text.in_({"📝 Додати нотатку", "📝 Add note"}))
+async def add_note_handler(m: types.Message, state: FSMContext):
     if await is_banned(m.from_user.id): return
     u = await Database.get_user(m.from_user.id)
-    text = m.text.replace("/note", "").strip()
-    if not text: return
+    text = m.text.replace("/note", "").strip() if m.text else ""
+    if not text or text in {"📝 Додати нотатку", "📝 Add note"}:
+        await state.set_state(NoteFSM.waiting_for_note)
+        prompt = await m.answer(t("note_prompt", u[5]))
+        schedule_delete(prompt)
+        return
+
     await Database.add_note(m.from_user.id, text)
-    await m.answer(t("saved_note", u[5]))
+    await state.clear()
+    done = await m.answer(t("saved_note", u[5]), reply_markup=await get_kb(m.from_user.id))
+    schedule_delete(done)
+    await safe_delete_message(m)
+
+@router.message(StateFilter(NoteFSM.waiting_for_note))
+async def save_note_from_state(m: types.Message, state: FSMContext):
+    if await is_banned(m.from_user.id):
+        await state.clear()
+        return
+
+    u = await Database.get_user(m.from_user.id)
+
+    if not m.text or not m.text.strip():
+        return await m.answer(t("note_empty", u[5]))
+
+    await Database.add_note(m.from_user.id, m.text.strip())
+    await state.clear()
+    done = await m.answer(t("saved_note", u[5]), reply_markup=await get_kb(m.from_user.id))
+    schedule_delete(done)
+    await safe_delete_message(m)
 
 @router.message(Command("search"))
-async def search_notes_handler(m: types.Message):
+@router.message(F.text.in_({"🔎 Пошук нотаток", "🔎 Search Notes"}))
+async def search_notes_handler(m: types.Message, state: FSMContext):
     if await is_banned(m.from_user.id): return
     u = await Database.get_user(m.from_user.id)
-    query = m.text.replace("/search", "").strip()
-    if not query: return
-    res = await Database.search_notes(m.from_user.id, query)
-    if not res: return await m.answer(t("search_empty", u[5]))
-    msg = "<b>🔎 Found:</b>\n\n" + "\n".join([f"🔹 {n[0]}" for n in res])
-    await m.answer(msg, parse_mode="HTML")
+    query = m.text.replace("/search", "").strip() if m.text else ""
+    if not query or query in {"🔎 Пошук нотаток", "🔎 Search Notes"}:
+        await state.set_state(NoteFSM.waiting_for_search_query)
+        prompt = await m.answer(t("search_prompt", u[5]))
+        schedule_delete(prompt)
+        return
 
-@router.message(F.text.in_({"📅 Створити нагадування", "📅 New Reminder"}))
+    await _do_notes_search(m, query, u[5])
+
+@router.message(StateFilter(NoteFSM.waiting_for_search_query))
+async def search_notes_from_state(m: types.Message, state: FSMContext):
+    if await is_banned(m.from_user.id):
+        await state.clear()
+        return
+    u = await Database.get_user(m.from_user.id)
+    query = (m.text or "").strip()
+    if not query:
+        return await m.answer(t("note_empty", u[5]))
+    await _do_notes_search(m, query, u[5])
+    await state.clear()
+
+async def _do_notes_search(m: types.Message, query: str, lang: str):
+    res = await Database.search_notes(m.from_user.id, query)
+    if not res:
+        empty = await m.answer(t("search_empty", lang))
+        schedule_delete(empty)
+        return
+    msg = t("found_title", lang) + "\n\n" + "\n".join([f"🔹 {n[0]}" for n in res])
+    found = await m.answer(msg, parse_mode="HTML")
+    schedule_delete(found, delay=45)
+    await safe_delete_message(m)
+
+def notes_list_kb(note_id: int, lang: str):
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text=t("edit_text_btn", lang), callback_data=f"note_edit_{note_id}"),
+        InlineKeyboardButton(text="🗑", callback_data=f"note_del_{note_id}")
+    ]])
+
+@router.message(F.text.in_({"📚 Мої нотатки", "📚 My Notes"}))
+async def my_notes_handler(m: types.Message):
+    if await is_banned(m.from_user.id):
+        return
+    u = await Database.get_user(m.from_user.id)
+    notes = await Database.get_notes(m.from_user.id, limit=10)
+    if not notes:
+        empty = await m.answer(t("notes_empty", u[5]))
+        schedule_delete(empty)
+        return
+    await m.answer(t("notes_title", u[5]), parse_mode="HTML")
+    for note_id, content, created_at in notes:
+        short = content if len(content) < 180 else content[:177] + "..."
+        await m.answer(f"🗒 <b>{created_at}</b>\n{short}", parse_mode="HTML", reply_markup=notes_list_kb(note_id, u[5]))
+
+@router.callback_query(F.data.startswith("note_del_"))
+async def note_delete_handler(call: types.CallbackQuery):
+    note_id = int(call.data.split("_")[-1])
+    await Database.delete_note(note_id, call.from_user.id)
+    u = await Database.get_user(call.from_user.id)
+    await call.message.edit_text(t("note_deleted", u[5]))
+    await call.answer()
+
+@router.callback_query(F.data.startswith("note_edit_"))
+async def note_edit_start(call: types.CallbackQuery, state: FSMContext):
+    note_id = int(call.data.split("_")[-1])
+    note = await Database.get_note_by_id(call.from_user.id, note_id)
+    if not note:
+        u = await Database.get_user(call.from_user.id)
+        await call.answer(t("not_found", u[5]), show_alert=True)
+        return
+    await state.set_state(NoteFSM.waiting_for_note_edit_text)
+    await state.update_data(edit_note_id=note_id)
+    u = await Database.get_user(call.from_user.id)
+    await call.message.answer(t("ask_note_edit_text", u[5]))
+    await call.answer()
+
+@router.message(StateFilter(NoteFSM.waiting_for_note_edit_text))
+async def note_edit_save(m: types.Message, state: FSMContext):
+    if await is_banned(m.from_user.id):
+        await state.clear()
+        return
+    data = await state.get_data()
+    note_id = data.get("edit_note_id")
+    u = await Database.get_user(m.from_user.id)
+    text = (m.text or "").strip()
+    if not text:
+        return await m.answer(t("note_empty", u[5]))
+    await Database.update_note(note_id, m.from_user.id, text)
+    await state.clear()
+    done = await m.answer(t("note_updated", u[5]))
+    schedule_delete(done)
+    await safe_delete_message(m)
+
+@router.message(F.text.in_({"📅 Нагадування", "📅 New Reminder"}))
 async def start_creation(m: types.Message, state: FSMContext):
     if await is_banned(m.from_user.id): return
-    await m.answer("✍️ Text:", parse_mode="Markdown")
+    u = await Database.get_user(m.from_user.id)
+    await m.answer(t("ask_rem_text", u[5]), parse_mode="Markdown")
     await state.set_state(ReminderFSM.waiting_for_text)
 
 @router.message(StateFilter(ReminderFSM.waiting_for_text))
 async def step_text_saved(m: types.Message, state: FSMContext):
+    u = await Database.get_user(m.from_user.id)
     await state.update_data(remind_text=m.text)
     calendar = SimpleCalendar()
-    await m.answer("📅 Date:", reply_markup=await calendar.start_calendar())
+    await m.answer(t("ask_rem_date", u[5]), reply_markup=await calendar.start_calendar())
     await state.set_state(ReminderFSM.waiting_for_date)
 
 @router.callback_query(SimpleCalendarCallback.filter(), StateFilter(ReminderFSM.waiting_for_date))
@@ -339,9 +473,10 @@ async def process_calendar(callback: types.CallbackQuery, callback_data: dict, s
     calendar = SimpleCalendar()
     selected, date = await calendar.process_selection(callback, callback_data)
     if selected:
+        u = await Database.get_user(callback.from_user.id)
         formatted_date = date.strftime("%Y-%m-%d")
         await state.update_data(remind_date=formatted_date)
-        await callback.message.edit_text(f"📅 {formatted_date}\n⏰ Time (HH:MM):", reply_markup=get_time_kb())
+        await callback.message.edit_text(f"📅 {formatted_date}\n{t('ask_rem_time', u[5])}", reply_markup=get_time_kb())
         await state.set_state(ReminderFSM.waiting_for_time)
 
 @router.callback_query(F.data.startswith("time_"), StateFilter(ReminderFSM.waiting_for_time))
@@ -363,10 +498,11 @@ async def finalize_reminder(message: types.Message, time_str: str, state: FSMCon
     u = await Database.get_user(user_id)
     full_datetime = f"{data['remind_date']} {time_str}:00"
     await Database.add_reminder(user_id, message.chat.id, data['remind_text'], full_datetime, recurrence=None)
-    await message.answer(f"{t('rem_created', u[5])}\n📌 {data['remind_text']}\n⏰ {full_datetime}", parse_mode="HTML", reply_markup=await get_kb(user_id))
+    done = await message.answer(f"{t('rem_created', u[5])}\n📌 {data['remind_text']}\n⏰ {full_datetime}", parse_mode="HTML", reply_markup=await get_kb(user_id))
+    schedule_delete(done, delay=20)
     await state.clear()
 
-@router.message(F.text.in_({"📋 Список планів", "📋 My Plans"}))
+@router.message(F.text.in_({"📋 Мої плани", "📋 My Plans"}))
 async def show_list(m: types.Message):
     if await is_banned(m.from_user.id): return
     u = await Database.get_user(m.from_user.id)
@@ -380,11 +516,11 @@ async def show_list(m: types.Message):
         rid, r_time, r_text = r
         r_date = r_time.split(" ")[0]
         r_clock = r_time.split(" ")[1][:5]
-        date_info = f"Today {r_clock}" if r_date == today_str else f"{r_date} {r_clock}"
+        date_info = f"{t('today_label', u[5])} {r_clock}" if r_date == today_str else f"{r_date} {r_clock}"
         
         kb = InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="✏️ Edit", callback_data=f"edit_{rid}"),
-            InlineKeyboardButton(text="❌ Del", callback_data=f"del_{rid}")
+            InlineKeyboardButton(text=t("edit_text_btn", u[5]), callback_data=f"edit_{rid}"),
+            InlineKeyboardButton(text="❌", callback_data=f"del_{rid}")
         ]])
         await m.answer(f"📝 *{r_text}*\n⏰ {date_info}", parse_mode="Markdown", reply_markup=kb)
 
@@ -392,13 +528,14 @@ async def show_list(m: types.Message):
 @router.callback_query(F.data.startswith("edit_"))
 async def edit_start(call: types.CallbackQuery, state: FSMContext):
     rid = call.data.split("_")[1]
+    u = await Database.get_user(call.from_user.id)
     await state.update_data(edit_id=rid)
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📝 Text", callback_data="edopt_text")],
-        [InlineKeyboardButton(text="⏰ Time", callback_data="edopt_time")],
-        [InlineKeyboardButton(text="🔙 Cancel", callback_data="edopt_cancel")]
+        [InlineKeyboardButton(text=t("edit_text_btn", u[5]), callback_data="edopt_text")],
+        [InlineKeyboardButton(text=t("edit_time_btn", u[5]), callback_data="edopt_time")],
+        [InlineKeyboardButton(text=t("edit_cancel_btn", u[5]), callback_data="edopt_cancel")]
     ])
-    await call.message.answer("Edit what?", reply_markup=kb)
+    await call.message.answer(t("edit_what", u[5]), reply_markup=kb)
     await state.set_state(EditFSM.choosing_option)
     await call.answer()
 
@@ -410,18 +547,23 @@ async def edit_option_handler(call: types.CallbackQuery, state: FSMContext):
         await state.clear()
         return
     if action == "text":
-        await call.message.edit_text("New text:")
+        u = await Database.get_user(call.from_user.id)
+        await call.message.edit_text(t("ask_new_text", u[5]))
         await state.set_state(EditFSM.editing_text)
     elif action == "time":
+        u = await Database.get_user(call.from_user.id)
         calendar = SimpleCalendar()
-        await call.message.edit_text("New date:", reply_markup=await calendar.start_calendar())
+        await call.message.edit_text(t("ask_new_date", u[5]), reply_markup=await calendar.start_calendar())
         await state.set_state(EditFSM.editing_date)
 
 @router.message(StateFilter(EditFSM.editing_text))
 async def save_new_text(m: types.Message, state: FSMContext):
+    u = await Database.get_user(m.from_user.id)
     data = await state.get_data()
     await Database.update_reminder_field(data['edit_id'], "remind_text", m.text)
-    await m.answer("✅ Updated!", reply_markup=await get_kb(m.from_user.id))
+    done = await m.answer(t("updated_ok", u[5]), reply_markup=await get_kb(m.from_user.id))
+    schedule_delete(done)
+    await safe_delete_message(m)
     await state.clear()
 
 @router.callback_query(SimpleCalendarCallback.filter(), StateFilter(EditFSM.editing_date))
@@ -429,35 +571,49 @@ async def edit_date_process(callback: types.CallbackQuery, callback_data: dict, 
     calendar = SimpleCalendar()
     selected, date = await calendar.process_selection(callback, callback_data)
     if selected:
+        u = await Database.get_user(callback.from_user.id)
         await state.update_data(new_date=date.strftime("%Y-%m-%d"))
-        await callback.message.edit_text("New time:", reply_markup=get_time_kb())
+        await callback.message.edit_text(t("ask_new_time", u[5]), reply_markup=get_time_kb())
         await state.set_state(EditFSM.editing_time)
 
 @router.callback_query(F.data.startswith("time_"), StateFilter(EditFSM.editing_time))
 async def edit_time_btn(callback: types.CallbackQuery, state: FSMContext):
     time_val = callback.data.split("_")[1]
-    await save_new_time(callback.message, time_val, state)
+    await save_new_time(callback.message, time_val, state, callback.from_user.id)
 
 @router.message(StateFilter(EditFSM.editing_time))
 async def edit_time_text(m: types.Message, state: FSMContext):
     clean_time = normalize_time(m.text)
     if not clean_time:
         return await m.answer("⚠️ Format error.")
-    await save_new_time(m, clean_time, state)
+    await save_new_time(m, clean_time, state, m.from_user.id)
 
-async def save_new_time(message, time_val, state):
+async def save_new_time(message, time_val, state, user_id):
+    u = await Database.get_user(user_id)
     data = await state.get_data()
     full_dt = f"{data['new_date']} {time_val}:00"
     await Database.update_reminder_field(data['edit_id'], "remind_time", full_dt)
-    await message.answer(f"✅ {full_dt}", reply_markup=await get_kb(message.chat.id))
+    done = await message.answer(f"{t('updated_ok', u[5])} {full_dt}", reply_markup=await get_kb(message.chat.id))
+    schedule_delete(done)
     await state.clear()
+
+
+@router.callback_query(F.data.startswith("confirm_"))
+async def confirm_reminder(call: types.CallbackQuery):
+    rid = call.data.split("_")[1]
+    await Database.update_reminder_field(rid, "status", "fired")
+    await Database.update_reminder_field(rid, "last_spam_sent_at", None)
+    await call.message.edit_reply_markup(reply_markup=None)
+    await call.answer("✅ Відмічено")
+    schedule_delete(call.message, delay=2)
 
 @router.callback_query(F.data.startswith("del_"))
 async def del_rem(call: types.CallbackQuery):
     rid = call.data.split("_")[1]
+    u = await Database.get_user(call.from_user.id)
     await Database.delete_reminder(rid)
     await call.message.delete()
-    await call.answer("Deleted")
+    await call.answer(t("deleted_ok", u[5]))
 
 # --- ІНШІ ХЕНДЛЕРИ (ГОЛОС, ФОТО, ТЕКСТ) ---
 
@@ -491,8 +647,10 @@ async def location_handler(m: types.Message):
 
 @router.message(F.text)
 async def text_handler(m: types.Message):
-    ignored = ["📋 Список планів", "📋 My Plans", "📍 Погода", "📍 Weather", 
-               "📅 Створити нагадування", "📅 New Reminder", "⚙️ Налаштування", "⚙️ Settings"]
+    ignored = ["📋 Мої плани", "📋 My Plans", "📍 Погода", "📍 Weather", 
+               "📅 Нагадування", "📅 New Reminder", "⚙️ Налаштування", "⚙️ Settings",
+               "📝 Додати нотатку", "📝 Add note", "📚 Мої нотатки", "📚 My Notes",
+               "🔎 Пошук нотаток", "🔎 Search Notes"]
     if m.text in ignored: return
     if m.text.startswith("/"): return
     if await is_banned(m.from_user.id):

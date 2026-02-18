@@ -93,7 +93,7 @@ async def main():
     await set_commands(bot)
     
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(checker, 'interval', seconds=30, args=[bot])
+    scheduler.add_job(checker, 'interval', seconds=30, args=[bot], max_instances=1, coalesce=True)
     # Ранковий бріфінг щодня о 08:00
     scheduler.add_job(daily_morning_briefing, 'cron', hour=8, minute=0, args=[bot])
     scheduler.start()
