@@ -174,8 +174,38 @@ async def cmd_restart(m: types.Message):
 @router.message(Command("db_clean"))
 async def manual_clean(m: types.Message):
     if m.from_user.id not in ADMIN_IDS: return
-    await Database.clean_old_data(days=0)
-    await m.answer("🧹 База очищена.")
+
+    parts = (m.text or "").split()
+    arg = parts[1].lower() if len(parts) > 1 else "done"
+
+    if arg.isdigit():
+        days = int(arg)
+        deleted = await Database.clean_old_data(days=days)
+        await m.answer(f"🧹 Видалено завершених/неактивних нагадувань за {days} дн.: {deleted}")
+        return
+
+    if arg in {"done", "default"}:
+        deleted = await Database.clean_old_data(days=0)
+        await m.answer(f"🧹 Видалено завершених/неактивних нагадувань: {deleted}")
+        return
+
+    if arg in {"overdue", "old_pending"}:
+        deleted = await Database.clean_overdue_pending()
+        await m.answer(f"🧹 Видалено прострочених pending-нагадувань: {deleted}")
+        return
+
+    if arg in {"all", "full"}:
+        deleted = await Database.clean_all_reminders()
+        await m.answer(f"💥 Повна очистка reminders завершена. Видалено: {deleted}")
+        return
+
+    await m.answer(
+        "⚙️ /db_clean режими:\n"
+        "• /db_clean — завершені/неактивні\n"
+        "• /db_clean 30 — завершені/неактивні старше N днів\n"
+        "• /db_clean overdue — прострочені pending\n"
+        "• /db_clean all — повна очистка reminders"
+    )
 
 # --- БАН СИСТЕМА ---
 

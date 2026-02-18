@@ -42,6 +42,10 @@ class Database:
                 CREATE TABLE IF NOT EXISTS context (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, role TEXT, content TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )""")
+
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_reminders_status_time ON reminders(status, remind_time)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_reminders_user_status_time ON reminders(user_id, status, remind_time)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_notes_user_id ON notes(user_id)")
             await db.commit()
 
     @staticmethod
@@ -171,10 +175,34 @@ class Database:
     async def clean_old_data(days=7):
         async with aiosqlite.connect(DB_NAME, timeout=30) as db:
             if days > 0:
-                await db.execute("DELETE FROM reminders WHERE status != 'pending' AND remind_time < datetime('now', ?)", (f'-{days} days',))
+                cur = await db.execute("DELETE FROM reminders WHERE status != 'pending' AND remind_time < datetime('now', ?)", (f'-{days} days',))
             else:
-                await db.execute("DELETE FROM reminders WHERE status != 'pending'")
+                cur = await db.execute("DELETE FROM reminders WHERE status != 'pending'")
+
+            deleted = cur.rowcount if cur.rowcount is not None else 0
+            await db.execute("PRAGMA optimize")
             await db.commit()
+            return deleted
+
+    @staticmethod
+    async def clean_overdue_pending():
+        """Видаляє прострочені pending-нагадування (минулі дати)."""
+        async with aiosqlite.connect(DB_NAME, timeout=30) as db:
+            cur = await db.execute("DELETE FROM reminders WHERE status='pending' AND remind_time < datetime('now')")
+            deleted = cur.rowcount if cur.rowcount is not None else 0
+            await db.execute("PRAGMA optimize")
+            await db.commit()
+            return deleted
+
+    @staticmethod
+    async def clean_all_reminders():
+        """Аварійна повна очистка таблиці reminders."""
+        async with aiosqlite.connect(DB_NAME, timeout=30) as db:
+            cur = await db.execute("DELETE FROM reminders")
+            deleted = cur.rowcount if cur.rowcount is not None else 0
+            await db.execute("VACUUM")
+            await db.commit()
+            return deleted
 
     @staticmethod
     async def get_all_users():
