@@ -297,6 +297,9 @@ async def cmd_report(m: types.Message):
     
     if not text: return await m.answer("✍️ ...")
     
+    if not ADMIN_IDS:
+        return await m.answer("⚠️ Адміністратори не налаштовані." if lang == "uk" else "⚠️ Admins are not configured.")
+
     sent_count = 0
     for admin_id in ADMIN_IDS:
         try: 
@@ -309,6 +312,15 @@ async def cmd_report(m: types.Message):
     
     if sent_count > 0:
         await m.answer("✅", reply_markup=await get_kb(m.from_user.id))
+
+
+@router.message(Command("ping"))
+async def cmd_ping(m: types.Message):
+    if await is_banned(m.from_user.id):
+        return
+    u = await Database.get_user(m.from_user.id)
+    lang = u[5]
+    await m.answer("✅ Бот працює стабільно." if lang == "uk" else "✅ Bot is running normally.")
 
 # --- НАЛАШТУВАННЯ (SETTINGS) ---
 
