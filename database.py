@@ -10,8 +10,14 @@ class Database:
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS reminders (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, chat_id INTEGER, 
-                    remind_text TEXT, remind_time TEXT, recurrence TEXT DEFAULT NULL, status TEXT DEFAULT 'pending'
+                    remind_text TEXT, remind_time TEXT, recurrence TEXT DEFAULT NULL, status TEXT DEFAULT 'pending',
+                    last_spam_sent_at TEXT DEFAULT NULL
                 )""")
+
+            async with db.execute("PRAGMA table_info(reminders)") as c:
+                reminder_cols = {row[1] for row in await c.fetchall()}
+            if "last_spam_sent_at" not in reminder_cols:
+                await db.execute("ALTER TABLE reminders ADD COLUMN last_spam_sent_at TEXT DEFAULT NULL")
             
             # Оновлена структура користувача
             await db.execute("""
@@ -93,6 +99,32 @@ class Database:
         async with aiosqlite.connect(DB_NAME) as db:
             async with db.execute("SELECT content FROM notes WHERE user_id=? ORDER BY id DESC LIMIT ?", (user_id, limit)) as c:
                 return [row[0] for row in await c.fetchall()]
+
+    @staticmethod
+    async def get_notes(user_id, limit=10, offset=0):
+        async with aiosqlite.connect(DB_NAME) as db:
+            sql = "SELECT id, content, created_at FROM notes WHERE user_id=? ORDER BY id DESC LIMIT ? OFFSET ?"
+            async with db.execute(sql, (user_id, limit, offset)) as c:
+                return await c.fetchall()
+
+    @staticmethod
+    async def get_note_by_id(user_id, note_id):
+        async with aiosqlite.connect(DB_NAME) as db:
+            sql = "SELECT id, content, created_at FROM notes WHERE user_id=? AND id=?"
+            async with db.execute(sql, (user_id, note_id)) as c:
+                return await c.fetchone()
+
+    @staticmethod
+    async def update_note(note_id, user_id, content):
+        async with aiosqlite.connect(DB_NAME) as db:
+            await db.execute("UPDATE notes SET content=? WHERE id=? AND user_id=?", (content, note_id, user_id))
+            await db.commit()
+
+    @staticmethod
+    async def delete_note(note_id, user_id):
+        async with aiosqlite.connect(DB_NAME) as db:
+            await db.execute("DELETE FROM notes WHERE id=? AND user_id=?", (note_id, user_id))
+            await db.commit()
 
     @staticmethod
     async def add_to_context(user_id, role, content):

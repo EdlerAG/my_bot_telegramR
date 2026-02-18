@@ -15,49 +15,67 @@ async def checker(bot: Bot):
     try:
         now = datetime.now(pytz.timezone(TIMEZONE))
         now_str = now.strftime("%Y-%m-%d %H:%M:%S")
-        
+        spam_cutoff = (now - timedelta(seconds=60)).strftime("%Y-%m-%d %H:%M:%S")
+
         async with aiosqlite.connect(DB_NAME) as db:
-            query = """SELECT id, chat_id, remind_text, user_id, status, recurrence, remind_time 
-                       FROM reminders WHERE (status='pending' AND remind_time <= ?) OR status='spamming'"""
-            async with db.execute(query, (now_str,)) as c:
+            query = """SELECT id, chat_id, remind_text, user_id, status, recurrence, remind_time, last_spam_sent_at
+                       FROM reminders
+                       WHERE (status='pending' AND remind_time <= ?)
+                          OR (status='spamming' AND (last_spam_sent_at IS NULL OR last_spam_sent_at <= ?))"""
+            async with db.execute(query, (now_str, spam_cutoff)) as c:
                 rows = await c.fetchall()
-                
+
             for r in rows:
-                rid, chat_id, text, user_id, status, recurrence, r_time = r
+                rid, chat_id, text, user_id, status, recurrence, r_time, _last_spam_sent = r
                 user = await Database.get_user(user_id)
                 # user: 0=toxic, 4=spam, 5=lang, 6=morning, 7=banned
                 is_toxic, spam_mode, is_banned = user[0], user[4], user[7]
-                
-                if is_banned: continue 
+
+                if is_banned:
+                    continue
 
                 kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Done", callback_data=f"confirm_{rid}")]])
-                
+
                 if spam_mode:
                     if status == 'pending':
-                        await db.execute("UPDATE reminders SET status='spamming' WHERE id=?", (rid,))
+                        await db.execute(
+                            "UPDATE reminders SET status='spamming', last_spam_sent_at=? WHERE id=?",
+                            (now_str, rid)
+                        )
+                    else:
+                        await db.execute("UPDATE reminders SET last_spam_sent_at=? WHERE id=?", (now_str, rid))
+
                     msg = f"🤬 РОБИ ДАВАЙ: {text}" if is_toxic else f"🔔 Reminder: {text}"
-                    try: await bot.send_message(chat_id, msg, reply_markup=kb)
-                    except Exception as e: logger.error(f"Send error: {e}")
-                
+                    try:
+                        await bot.send_message(chat_id, msg, reply_markup=kb)
+                    except Exception as e:
+                        logger.error(f"Send error: {e}")
+                    continue
+
+                # Якщо spam_mode вимкнений, то нагадування повинно відпрацювати лише один раз
+                prefix = "🔔"
+                try:
+                    await bot.send_message(chat_id, f"{prefix} {text}")
+                except Exception as e:
+                    logger.error(f"Send error: {e}")
+
+                if recurrence == 'daily':
+                    try:
+                        old_time = datetime.strptime(r_time, "%Y-%m-%d %H:%M:%S")
+                        new_time = (old_time + timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
+                        await db.execute(
+                            "UPDATE reminders SET remind_time=?, status='pending', last_spam_sent_at=NULL WHERE id=?",
+                            (new_time, rid)
+                        )
+                    except Exception:
+                        await db.execute("UPDATE reminders SET status='fired', last_spam_sent_at=NULL WHERE id=?", (rid,))
                 else:
-                    if status == 'pending':
-                        prefix = "🔔" 
-                        try: await bot.send_message(chat_id, f"{prefix} {text}")
-                        except: pass
-                        
-                        if recurrence == 'daily':
-                            try:
-                                old_time = datetime.strptime(r_time, "%Y-%m-%d %H:%M:%S")
-                                new_time = (old_time + timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
-                                await db.execute("UPDATE reminders SET remind_time=?, status='pending' WHERE id=?", (new_time, rid))
-                            except:
-                                await db.execute("UPDATE reminders SET status='fired' WHERE id=?", (rid,))
-                        else:
-                            await db.execute("UPDATE reminders SET status='fired' WHERE id=?", (rid,))
-            
+                    await db.execute("UPDATE reminders SET status='fired', last_spam_sent_at=NULL WHERE id=?", (rid,))
+
             await db.commit()
     except Exception as e:
         logger.error(f"Task error: {e}")
+
 
 async def daily_morning_briefing(bot: Bot):
     """Розсилає ранкове повідомлення тим, у кого воно включено"""
