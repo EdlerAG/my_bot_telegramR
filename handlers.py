@@ -2,7 +2,7 @@ import os
 import re
 import asyncio
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from aiogram import Router, F, types
 from aiogram.filters import CommandStart, Command, StateFilter
 from aiogram.fsm.context import FSMContext
@@ -97,13 +97,16 @@ async def get_kb(user_id):
 
 async def get_settings_kb(user_id):
     u = await Database.get_user(user_id)
-    # 0=toxic, 4=spam, 5=lang, 6=morning
+    # 0=toxic, 4=spam, 5=lang, 6=morning, 8=show_done, 9=history_days
     is_toxic, spam_mode, lang, morning = u[0], u[4], u[5], u[6]
+    show_done, history_days = u[8], u[9]
     
     kb = [
         [InlineKeyboardButton(text=t("mode_toxic", lang) if is_toxic else t("mode_nice", lang), callback_data="toggle_toxic")],
         [InlineKeyboardButton(text=t("spam_on", lang) if spam_mode else t("spam_off", lang), callback_data="toggle_spam")],
         [InlineKeyboardButton(text=t("morning_on", lang) if morning else t("morning_off", lang), callback_data="toggle_morning")],
+        [InlineKeyboardButton(text=t("show_done_on", lang) if show_done else t("show_done_off", lang), callback_data="toggle_show_done")],
+        [InlineKeyboardButton(text=t("history_days", lang).format(days=history_days), callback_data="cycle_history_days")],
         [InlineKeyboardButton(text=t("lang_btn", lang), callback_data="toggle_lang")],
         [InlineKeyboardButton(text="❌ Close", callback_data="close_settings")]
     ]
@@ -371,6 +374,22 @@ async def settings_toggle_morning(call: types.CallbackQuery):
     await safe_callback_answer(call)
     u = await Database.get_user(call.from_user.id)
     await Database.update_user(call.from_user.id, morning_briefing=not u[6])
+    await safe_edit_reply_markup(call.message, reply_markup=await get_settings_kb(call.from_user.id))
+
+@router.callback_query(F.data == "toggle_show_done")
+async def settings_toggle_show_done(call: types.CallbackQuery):
+    await safe_callback_answer(call)
+    u = await Database.get_user(call.from_user.id)
+    await Database.update_user(call.from_user.id, show_done_plans=not u[8])
+    await safe_edit_reply_markup(call.message, reply_markup=await get_settings_kb(call.from_user.id))
+
+@router.callback_query(F.data == "cycle_history_days")
+async def settings_cycle_history_days(call: types.CallbackQuery):
+    await safe_callback_answer(call)
+    u = await Database.get_user(call.from_user.id)
+    current_days = u[9] if u[9] in (1, 3, 7) else 1
+    next_days = {1: 3, 3: 7, 7: 1}[current_days]
+    await Database.update_user(call.from_user.id, history_days=next_days)
     await safe_edit_reply_markup(call.message, reply_markup=await get_settings_kb(call.from_user.id))
 
 @router.callback_query(F.data == "toggle_lang")
@@ -660,23 +679,43 @@ async def ai_reminder_cancel_handler(call: types.CallbackQuery):
 async def show_list(m: types.Message):
     if await is_banned(m.from_user.id): return
     u = await Database.get_user(m.from_user.id)
-    rows = await Database.get_active_reminders(m.from_user.id)
+    history_days = u[9] if u[9] in (1, 3, 7) else 1
+    include_done = bool(u[8])
+    today = datetime.now()
+    start_dt = today.replace(hour=0, minute=0, second=0, microsecond=0)
+    if history_days > 1:
+        start_dt = start_dt - timedelta(days=history_days - 1)
+    end_dt = today.replace(hour=23, minute=59, second=59, microsecond=0)
+
+    rows = await Database.get_reminders_history(
+        m.from_user.id,
+        start_dt.strftime("%Y-%m-%d %H:%M:%S"),
+        end_dt.strftime("%Y-%m-%d %H:%M:%S"),
+        include_done=include_done,
+    )
     if not rows: return await m.answer(t("rem_list_empty", u[5]))
-    
+
     today_str = datetime.now().strftime("%Y-%m-%d")
-    await m.answer(f"📋 {t('btn_list_rem', u[5])}:")
-    
+    await m.answer(f"📋 {t('plans_for_period', u[5]).format(days=history_days)}")
+
     for r in rows:
-        rid, r_time, r_text = r
+        rid, r_time, r_text, status = r
         r_date = r_time.split(" ")[0]
         r_clock = r_time.split(" ")[1][:5]
         date_info = f"{t('today_label', u[5])} {r_clock}" if r_date == today_str else f"{r_date} {r_clock}"
-        
+        status_map = {
+            "pending": t("status_pending", u[5]),
+            "spamming": t("status_pending", u[5]),
+            "awaiting_confirm": t("status_wait_confirm", u[5]),
+            "fired": t("status_done", u[5]),
+        }
+        status_text = status_map.get(status, status)
+
         kb = InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text=t("edit_text_btn", u[5]), callback_data=f"edit_{rid}"),
             InlineKeyboardButton(text="❌", callback_data=f"del_{rid}")
         ]])
-        await m.answer(f"📝 {r_text}\n⏰ {date_info}", reply_markup=kb)
+        await m.answer(f"📝 {r_text}\n⏰ {date_info}\n{status_text}", reply_markup=kb)
 
 # --- РЕДАГУВАННЯ (загальна частина) ---
 @router.callback_query(F.data.startswith("edit_"))
@@ -757,11 +796,29 @@ async def save_new_time(message, time_val, state, user_id):
 
 @router.callback_query(F.data.startswith("confirm_"))
 async def confirm_reminder(call: types.CallbackQuery):
-    rid = call.data.split("_")[1]
-    await Database.update_reminder_field(rid, "status", "fired")
+    rid = int(call.data.split("_")[1])
+    details = await Database.get_reminder_details(rid)
+    if not details:
+        await safe_callback_answer(call, "⚠️")
+        return
+
+    _, owner_id, remind_time, recurrence, _status = details
+    if owner_id != call.from_user.id:
+        await safe_callback_answer(call, "⚠️")
+        return
+
+    if recurrence == "daily":
+        old_time = datetime.strptime(remind_time, "%Y-%m-%d %H:%M:%S")
+        new_time = (old_time + timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
+        await Database.update_reminder_field(rid, "remind_time", new_time)
+        await Database.update_reminder_field(rid, "status", "pending")
+    else:
+        await Database.update_reminder_field(rid, "status", "fired")
+
     await Database.update_reminder_field(rid, "last_spam_sent_at", None)
     await safe_edit_reply_markup(call.message, reply_markup=None)
-    await safe_callback_answer(call, "✅ Відмічено")
+    u = await Database.get_user(call.from_user.id)
+    await safe_callback_answer(call, t("done_marked", u[5]))
     schedule_delete(call.message, delay=2)
 
 @router.callback_query(F.data.startswith("del_"))

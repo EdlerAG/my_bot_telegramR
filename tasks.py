@@ -74,7 +74,9 @@ async def checker(bot: Bot):
             if is_banned:
                 continue
 
-            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Done", callback_data=f"confirm_{rid}")]])
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text=t("confirm_done_btn", lang), callback_data=f"confirm_{rid}")]]
+            )
 
             if spam_mode:
                 msg = (
@@ -100,25 +102,11 @@ async def checker(bot: Bot):
             # Якщо spam_mode вимкнений, нагадування відправляється один раз (або рескейлиться для daily)
             msg = f"🔔 {'Нагадування' if lang == 'uk' else 'Reminder'}: {text}"
             try:
-                await bot.send_message(chat_id, msg)
-                if recurrence == 'daily':
-                    try:
-                        old_time = datetime.strptime(r_time, "%Y-%m-%d %H:%M:%S")
-                        new_time = (old_time + timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
-                        updates.append((
-                            "UPDATE reminders SET remind_time=?, status='pending', last_spam_sent_at=NULL WHERE id=?",
-                            (new_time, rid),
-                        ))
-                    except Exception:
-                        updates.append((
-                            "UPDATE reminders SET status='fired', last_spam_sent_at=NULL WHERE id=?",
-                            (rid,),
-                        ))
-                else:
-                    updates.append((
-                        "UPDATE reminders SET status='fired', last_spam_sent_at=NULL WHERE id=?",
-                        (rid,),
-                    ))
+                await bot.send_message(chat_id, msg, reply_markup=kb)
+                updates.append((
+                    "UPDATE reminders SET status='awaiting_confirm', last_spam_sent_at=NULL WHERE id=?",
+                    (rid,),
+                ))
             except Exception as e:
                 logger.error(f"Send error: {e}")
 
