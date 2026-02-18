@@ -62,6 +62,11 @@ TEXTS = {
         "ask_new_time": "⏰ Введи новий час (HH:MM):",
         "deleted_ok": "🗑 Видалено.",
         "edit_note_id": "Редагування нотатки",
+        "confirm_ai_reminder": "Підтвердити це нагадування?",
+        "ai_reminder_confirmed": "✅ Нагадування підтверджено.",
+        "ai_reminder_cancelled": "🗑 Нагадування скасовано.",
+        "confirm_btn": "✅ Підтвердити",
+        "cancel_btn": "❌ Скасувати",
     },
     "en": {
         "welcome": "👋 Hi! I am Jarvis.",
@@ -126,6 +131,11 @@ TEXTS = {
         "ask_new_time": "⏰ Enter new time (HH:MM):",
         "deleted_ok": "🗑 Deleted.",
         "edit_note_id": "Editing note",
+        "confirm_ai_reminder": "Confirm this reminder?",
+        "ai_reminder_confirmed": "✅ Reminder confirmed.",
+        "ai_reminder_cancelled": "🗑 Reminder cancelled.",
+        "confirm_btn": "✅ Confirm",
+        "cancel_btn": "❌ Cancel",
     }
 }
 

@@ -92,11 +92,14 @@ class Database:
             await db.commit()
 
     @staticmethod
-    async def add_reminder(user_id, chat_id, text, time, recurrence):
+    async def add_reminder(user_id, chat_id, text, time, recurrence, status="pending"):
         async with aiosqlite.connect(DB_NAME, timeout=30) as db:
-            await db.execute("INSERT INTO reminders (user_id, chat_id, remind_text, remind_time, recurrence) VALUES (?,?,?,?,?)",
-                             (user_id, chat_id, text, time, recurrence))
+            cursor = await db.execute(
+                "INSERT INTO reminders (user_id, chat_id, remind_text, remind_time, recurrence, status) VALUES (?,?,?,?,?,?)",
+                (user_id, chat_id, text, time, recurrence, status),
+            )
             await db.commit()
+            return cursor.lastrowid
 
     @staticmethod
     async def add_note(user_id, content):
@@ -168,6 +171,14 @@ class Database:
         async with aiosqlite.connect(DB_NAME, timeout=30) as db:
             await db.execute(f"UPDATE reminders SET {field}=? WHERE id=?", (value, rem_id))
             await db.commit()
+
+
+    @staticmethod
+    async def get_reminder_owner(rem_id):
+        async with aiosqlite.connect(DB_NAME, timeout=30) as db:
+            async with db.execute("SELECT user_id FROM reminders WHERE id=?", (rem_id,)) as c:
+                row = await c.fetchone()
+                return row[0] if row else None
 
     @staticmethod
     async def delete_reminder(rem_id):

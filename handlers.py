@@ -88,7 +88,12 @@ async def get_kb(user_id):
         [KeyboardButton(text=t("btn_weather", lang), request_location=True)],
         [KeyboardButton(text=t("btn_settings", lang))]
     ]
-    return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+    return ReplyKeyboardMarkup(
+        keyboard=kb,
+        resize_keyboard=True,
+        one_time_keyboard=False,
+        is_persistent=True,
+    )
 
 async def get_settings_kb(user_id):
     u = await Database.get_user(user_id)
@@ -560,6 +565,7 @@ async def start_creation(m: types.Message, state: FSMContext):
     u = await Database.get_user(m.from_user.id)
     await m.answer(t("ask_rem_text", u[5]), parse_mode="Markdown")
     await state.set_state(ReminderFSM.waiting_for_text)
+    await safe_delete_message(m)
 
 @router.message(StateFilter(ReminderFSM.waiting_for_text))
 async def step_text_saved(m: types.Message, state: FSMContext):
@@ -568,6 +574,7 @@ async def step_text_saved(m: types.Message, state: FSMContext):
     calendar = SimpleCalendar()
     await m.answer(t("ask_rem_date", u[5]), reply_markup=await calendar.start_calendar())
     await state.set_state(ReminderFSM.waiting_for_date)
+    await safe_delete_message(m)
 
 @router.callback_query(SimpleCalendarCallback.filter(), StateFilter(ReminderFSM.waiting_for_date))
 async def process_calendar(callback: types.CallbackQuery, callback_data: dict, state: FSMContext):
@@ -594,6 +601,7 @@ async def process_time_text(m: types.Message, state: FSMContext):
     if not clean_time:
         return await m.answer(t("error_format", u[5]))
     await finalize_reminder(m, clean_time, state, m.from_user.id)
+    await safe_delete_message(m)
 
 async def finalize_reminder(message: types.Message, time_str: str, state: FSMContext, user_id: int):
     data = await state.get_data()
@@ -608,6 +616,45 @@ async def finalize_reminder(message: types.Message, time_str: str, state: FSMCon
     )
     schedule_delete(done, delay=20)
     await state.clear()
+
+
+def ai_reminder_confirm_kb(reminder_id: int, lang: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text=t("confirm_btn", lang), callback_data=f"ai_rem_confirm_{reminder_id}"),
+        InlineKeyboardButton(text=t("cancel_btn", lang), callback_data=f"ai_rem_cancel_{reminder_id}"),
+    ]])
+
+
+@router.callback_query(F.data.startswith("ai_rem_confirm_"))
+async def ai_reminder_confirm_handler(call: types.CallbackQuery):
+    reminder_id = int(call.data.split("_")[-1])
+    owner_id = await Database.get_reminder_owner(reminder_id)
+    if owner_id != call.from_user.id:
+        await safe_callback_answer(call, "⚠️")
+        return
+
+    u = await Database.get_user(call.from_user.id)
+    await Database.update_reminder_field(reminder_id, "status", "pending")
+    await safe_edit_reply_markup(call.message, reply_markup=None)
+    await safe_callback_answer(call, t("ai_reminder_confirmed", u[5]))
+    await call.message.answer(t("ai_reminder_confirmed", u[5]), reply_markup=await get_kb(call.from_user.id))
+    schedule_delete(call.message, delay=3)
+
+
+@router.callback_query(F.data.startswith("ai_rem_cancel_"))
+async def ai_reminder_cancel_handler(call: types.CallbackQuery):
+    reminder_id = int(call.data.split("_")[-1])
+    owner_id = await Database.get_reminder_owner(reminder_id)
+    if owner_id != call.from_user.id:
+        await safe_callback_answer(call, "⚠️")
+        return
+
+    u = await Database.get_user(call.from_user.id)
+    await Database.delete_reminder(reminder_id)
+    await safe_edit_reply_markup(call.message, reply_markup=None)
+    await safe_callback_answer(call, t("ai_reminder_cancelled", u[5]))
+    await call.message.answer(t("ai_reminder_cancelled", u[5]), reply_markup=await get_kb(call.from_user.id))
+    schedule_delete(call.message, delay=3)
 
 @router.message(F.text.in_({"📋 Мої плани", "📋 My Plans"}))
 async def show_list(m: types.Message):
@@ -784,10 +831,25 @@ async def process_smart(m, text):
             reply += f"\n\n{t('saved_note', u[5])}"
 
         if res.get('is_reminder') and res.get('time'):
-            await Database.add_reminder(m.from_user.id, m.chat.id, res['task'], res['time'], res['recurrence'])
+            reminder_id = await Database.add_reminder(
+                m.from_user.id,
+                m.chat.id,
+                res['task'],
+                res['time'],
+                res['recurrence'],
+                status="pending_confirm",
+            )
             reply += f"\n⏰ {res['time']}"
+            sent = await m.answer(
+                f"{reply}\n\n{t('confirm_ai_reminder', u[5])}",
+                reply_markup=ai_reminder_confirm_kb(reminder_id, u[5]),
+            )
+            schedule_delete(sent, delay=90)
+        else:
+            sent = await m.answer(reply)
+            schedule_delete(sent, delay=45)
 
-        await m.answer(reply)
+        await safe_delete_message(m)
 
 @router.error()
 async def error_handler(event: ErrorEvent):
