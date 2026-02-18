@@ -22,6 +22,7 @@ async def set_commands(bot: Bot):
         BotCommand(command="search", description="🔍 Пошук у нотатках"),
         BotCommand(command="report", description="🆘 Написати адміну"),
         BotCommand(command="ping", description="🩺 Перевірка стану бота"),
+        BotCommand(command="menu", description="📱 Повернути кнопки меню"),
     ]
     
     admin_commands_uk = user_commands_uk + [
@@ -47,6 +48,7 @@ async def set_commands(bot: Bot):
         BotCommand(command="search", description="🔍 Search notes"),
         BotCommand(command="report", description="🆘 Contact support"),
         BotCommand(command="ping", description="🩺 Bot health check"),
+        BotCommand(command="menu", description="📱 Restore menu buttons"),
     ]
 
     admin_commands_en = user_commands_en + [

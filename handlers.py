@@ -86,7 +86,7 @@ async def get_kb(user_id):
         [KeyboardButton(text=t("btn_add_note", lang)), KeyboardButton(text=t("btn_my_notes", lang))],
         [KeyboardButton(text=t("btn_search_notes", lang))],
         [KeyboardButton(text=t("btn_weather", lang), request_location=True)],
-        [KeyboardButton(text=t("btn_settings", lang))]
+        [KeyboardButton(text=t("btn_settings", lang)), KeyboardButton(text=t("btn_menu", lang))]
     ]
     return ReplyKeyboardMarkup(
         keyboard=kb,
@@ -354,6 +354,15 @@ async def open_settings(m: types.Message):
     if await is_banned(m.from_user.id): return
     u = await Database.get_user(m.from_user.id)
     await m.answer(t("settings_title", u[5]), reply_markup=await get_settings_kb(m.from_user.id), parse_mode="HTML")
+
+@router.message(Command("menu"))
+@router.message(F.text.in_({"📱 Меню", "📱 Menu"}))
+async def restore_menu(m: types.Message, state: FSMContext):
+    if await is_banned(m.from_user.id):
+        return
+    await state.clear()
+    u = await Database.get_user(m.from_user.id)
+    await m.answer(t("menu_restored", u[5]), reply_markup=await get_kb(m.from_user.id))
 
 @router.callback_query(F.data == "toggle_toxic")
 async def settings_toggle_toxic(call: types.CallbackQuery):
@@ -864,7 +873,7 @@ async def text_handler(m: types.Message):
     ignored = ["📋 Мої плани", "📋 My Plans", "📍 Погода", "📍 Weather", 
                "📅 Нагадування", "📅 New Reminder", "⚙️ Налаштування", "⚙️ Settings",
                "📝 Додати нотатку", "📝 Add note", "📚 Мої нотатки", "📚 My Notes",
-               "🔎 Пошук нотаток", "🔎 Search Notes"]
+               "🔎 Пошук нотаток", "🔎 Search Notes", "📱 Меню", "📱 Menu"]
     if m.text in ignored: return
     if m.text.startswith("/"): return
     if await is_banned(m.from_user.id):
@@ -903,7 +912,7 @@ async def process_smart(m, text):
             )
             schedule_delete(sent, delay=90)
         else:
-            sent = await m.answer(reply)
+            sent = await m.answer(reply, reply_markup=await get_kb(m.from_user.id))
             schedule_delete(sent, delay=45)
 
         await safe_delete_message(m)
