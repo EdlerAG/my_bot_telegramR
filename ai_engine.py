@@ -1,6 +1,7 @@
 import aiohttp
 import json
 import base64
+import re
 from datetime import datetime
 import pytz
 from config import GROQ_KEY, TIMEZONE, logger
@@ -10,6 +11,19 @@ from locales import t
 MODEL_TEXT = "llama-3.3-70b-versatile"
 MODEL_VISION = "llama-3.2-11b-vision-preview"
 MODEL_AUDIO = "whisper-large-v3"
+
+def sanitize_ai_reply(text: str, lang: str) -> str:
+    if not text:
+        return text
+
+    cleaned = text.replace("�", "").strip()
+    if lang != "uk":
+        return cleaned
+
+    cjk_chars = len(re.findall(r"[\u4e00-\u9fff\u3400-\u4dbf]", cleaned))
+    if cjk_chars >= 3:
+        return "Вибач, попередня відповідь пошкодилась. Напиши ще раз коротко — відповім чистою українською 🙌"
+    return cleaned
 
 async def groq_transcribe(file_path, lang="uk"):
     url = "https://api.groq.com/openai/v1/audio/transcriptions"
@@ -94,7 +108,9 @@ async def groq_text_brain(text, user_id, is_toxic, lat, lon, lang="uk", is_forwa
 
     system_prompt = f"""
     {persona}. 
-    User Language: {lang} (Strictly output in this language).
+    User Language: {lang}.
+    IMPORTANT: Always respond with clean natural {lang} text only.
+    Never output garbled symbols, mojibake, replacement characters, hieroglyphs, or mixed scripts.
     Time: {now.strftime("%Y-%m-%d %H:%M:%S")}. Weather: {weather_info}.
     User Notes (Second Brain): {notes}. Forwarded message: {is_forwarded}.
     
@@ -120,10 +136,17 @@ async def groq_text_brain(text, user_id, is_toxic, lat, lon, lang="uk", is_forwa
         async with aiohttp.ClientSession() as session:
             async with session.post("https://api.groq.com/openai/v1/chat/completions",
                 headers={"Authorization": f"Bearer {GROQ_KEY}"}, 
-                json={"model": MODEL_TEXT, "messages": messages, "response_format": {"type": "json_object"}}) as resp:
+                json={
+                    "model": MODEL_TEXT,
+                    "messages": messages,
+                    "response_format": {"type": "json_object"},
+                    "temperature": 0.2
+                }) as resp:
                 data = await resp.json()
                 content = data['choices'][0]['message']['content']
-                return json.loads(clean_json_response(content))
+                parsed = json.loads(clean_json_response(content))
+                parsed['reply'] = sanitize_ai_reply(parsed.get('reply', ''), lang)
+                return parsed
     except Exception as e:
         logger.error(f"Brain error: {e}")
         return None
