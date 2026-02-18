@@ -1,4 +1,5 @@
 import aiohttp
+from aiohttp import ClientTimeout
 import json
 import base64
 import re
@@ -11,6 +12,7 @@ from locales import t
 MODEL_TEXT = "llama-3.3-70b-versatile"
 MODEL_VISION = "llama-3.2-11b-vision-preview"
 MODEL_AUDIO = "whisper-large-v3"
+REQUEST_TIMEOUT = ClientTimeout(total=25, connect=10)
 
 def sanitize_ai_reply(text: str, lang: str) -> str:
     if not text:
@@ -35,7 +37,7 @@ async def groq_transcribe(file_path, lang="uk"):
             data = aiohttp.FormData()
             data.add_field('file', f)
             data.add_field('model', MODEL_AUDIO)
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(timeout=REQUEST_TIMEOUT) as session:
                 async with session.post(url, headers={"Authorization": f"Bearer {GROQ_KEY}"}, data=data) as resp:
                     return (await resp.json()).get('text', '')
     except Exception as e:
@@ -60,7 +62,7 @@ async def groq_analyze_image(text_prompt, image_path, is_toxic, lang="uk"):
         "max_tokens": 400
     }
     try:
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(timeout=REQUEST_TIMEOUT) as session:
             async with session.post("https://api.groq.com/openai/v1/chat/completions",
                 headers={"Authorization": f"Bearer {GROQ_KEY}"}, json=payload) as resp:
                 return (await resp.json())['choices'][0]['message']['content']
@@ -92,7 +94,7 @@ async def groq_summarize_video(video_id, lang="uk"):
         ]
     }
     try:
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(timeout=REQUEST_TIMEOUT) as session:
             async with session.post("https://api.groq.com/openai/v1/chat/completions",
                 headers={"Authorization": f"Bearer {GROQ_KEY}"}, json=payload) as resp:
                 data = await resp.json()
@@ -153,7 +155,7 @@ async def groq_text_brain(text, user_id, is_toxic, lat, lon, lang="uk", is_forwa
     messages = [{"role": "system", "content": system_prompt}] + history + [{"role": "user", "content": text}]
     
     try:
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(timeout=REQUEST_TIMEOUT) as session:
             async with session.post("https://api.groq.com/openai/v1/chat/completions",
                 headers={"Authorization": f"Bearer {GROQ_KEY}"}, 
                 json={

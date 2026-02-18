@@ -8,6 +8,7 @@ from aiogram.filters import CommandStart, Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, ErrorEvent, FSInputFile
+from aiogram.exceptions import TelegramBadRequest
 from aiogram_calendar import SimpleCalendar, SimpleCalendarCallback
 
 from database import Database
@@ -55,6 +56,21 @@ async def delete_later(msg: types.Message, delay: int = 12):
 
 def schedule_delete(msg: types.Message, delay: int = 12):
     asyncio.create_task(delete_later(msg, delay))
+
+async def safe_edit_reply_markup(message: types.Message, reply_markup=None):
+    try:
+        await message.edit_reply_markup(reply_markup=reply_markup)
+    except TelegramBadRequest as e:
+        if "message is not modified" not in str(e).lower():
+            raise
+
+async def safe_callback_answer(call: types.CallbackQuery, text: str | None = None):
+    try:
+        await call.answer(text=text)
+    except TelegramBadRequest as e:
+        ignored = ("query is too old", "query id is invalid")
+        if not any(msg in str(e).lower() for msg in ignored):
+            raise
 
 # --- ПЕРЕВІРКА НА БАН ---
 async def is_banned(user_id):
@@ -333,34 +349,39 @@ async def open_settings(m: types.Message):
 
 @router.callback_query(F.data == "toggle_toxic")
 async def settings_toggle_toxic(call: types.CallbackQuery):
+    await safe_callback_answer(call)
     u = await Database.get_user(call.from_user.id)
     await Database.update_user(call.from_user.id, is_toxic=not u[0])
-    await call.message.edit_reply_markup(reply_markup=await get_settings_kb(call.from_user.id))
+    await safe_edit_reply_markup(call.message, reply_markup=await get_settings_kb(call.from_user.id))
 
 @router.callback_query(F.data == "toggle_spam")
 async def settings_toggle_spam(call: types.CallbackQuery):
+    await safe_callback_answer(call)
     u = await Database.get_user(call.from_user.id)
     await Database.update_user(call.from_user.id, spam_mode=not u[4])
-    await call.message.edit_reply_markup(reply_markup=await get_settings_kb(call.from_user.id))
+    await safe_edit_reply_markup(call.message, reply_markup=await get_settings_kb(call.from_user.id))
 
 @router.callback_query(F.data == "toggle_morning")
 async def settings_toggle_morning(call: types.CallbackQuery):
+    await safe_callback_answer(call)
     u = await Database.get_user(call.from_user.id)
     await Database.update_user(call.from_user.id, morning_briefing=not u[6])
-    await call.message.edit_reply_markup(reply_markup=await get_settings_kb(call.from_user.id))
+    await safe_edit_reply_markup(call.message, reply_markup=await get_settings_kb(call.from_user.id))
 
 @router.callback_query(F.data == "toggle_lang")
 async def settings_toggle_lang(call: types.CallbackQuery):
+    await safe_callback_answer(call)
     u = await Database.get_user(call.from_user.id)
     new_lang = "en" if u[5] == "uk" else "uk"
     await Database.update_user(call.from_user.id, language=new_lang)
-    await call.message.delete()
+    await safe_delete_message(call.message)
     # Оновлюємо клавіатуру на нову мову
     await call.message.answer(t("changed", new_lang), reply_markup=await get_kb(call.from_user.id))
 
 @router.callback_query(F.data == "close_settings")
 async def close_settings(call: types.CallbackQuery):
-    await call.message.delete()
+    await safe_callback_answer(call)
+    await safe_delete_message(call.message)
 
 # --- START & ONBOARDING ---
 
@@ -375,6 +396,7 @@ async def start(m: types.Message, state: FSMContext):
 
 @router.callback_query(F.data.startswith("set_lang_"))
 async def set_language_start(call: types.CallbackQuery):
+    await safe_callback_answer(call)
     lang_code = call.data.split("_")[2]
     await Database.update_user(call.from_user.id, language=lang_code)
     welcome_text = t("welcome", lang_code) + "\n\n" + t("features", lang_code)
@@ -561,8 +583,8 @@ async def process_calendar(callback: types.CallbackQuery, callback_data: dict, s
 @router.callback_query(F.data.startswith("time_"), StateFilter(ReminderFSM.waiting_for_time))
 async def process_time_btn(callback: types.CallbackQuery, state: FSMContext):
     time_val = callback.data.split("_")[1]
+    await safe_callback_answer(callback)
     await finalize_reminder(callback.message, time_val, state, callback.from_user.id)
-    await callback.answer()
 
 @router.message(StateFilter(ReminderFSM.waiting_for_time))
 async def process_time_text(m: types.Message, state: FSMContext):
@@ -577,7 +599,7 @@ async def finalize_reminder(message: types.Message, time_str: str, state: FSMCon
     u = await Database.get_user(user_id)
     full_datetime = f"{data['remind_date']} {time_str}:00"
     await Database.add_reminder(user_id, message.chat.id, data['remind_text'], full_datetime, recurrence=None)
-    done = await message.answer(f"{t('rem_created', u[5])}\n📌 {data['remind_text']}\n⏰ {full_datetime}", parse_mode="HTML", reply_markup=await get_kb(user_id))
+    done = await message.answer(f"{t('rem_created', u[5])}\n📌 {data['remind_text']}\n⏰ {full_datetime}", reply_markup=await get_kb(user_id))
     schedule_delete(done, delay=20)
     await state.clear()
 
@@ -589,7 +611,7 @@ async def show_list(m: types.Message):
     if not rows: return await m.answer(t("rem_list_empty", u[5]))
     
     today_str = datetime.now().strftime("%Y-%m-%d")
-    await m.answer(f"📋 **{t('btn_list_rem', u[5])}:**", parse_mode="Markdown")
+    await m.answer(f"📋 {t('btn_list_rem', u[5])}:")
     
     for r in rows:
         rid, r_time, r_text = r
@@ -601,11 +623,12 @@ async def show_list(m: types.Message):
             InlineKeyboardButton(text=t("edit_text_btn", u[5]), callback_data=f"edit_{rid}"),
             InlineKeyboardButton(text="❌", callback_data=f"del_{rid}")
         ]])
-        await m.answer(f"📝 *{r_text}*\n⏰ {date_info}", parse_mode="Markdown", reply_markup=kb)
+        await m.answer(f"📝 {r_text}\n⏰ {date_info}", reply_markup=kb)
 
 # --- РЕДАГУВАННЯ (загальна частина) ---
 @router.callback_query(F.data.startswith("edit_"))
 async def edit_start(call: types.CallbackQuery, state: FSMContext):
+    await safe_callback_answer(call)
     rid = call.data.split("_")[1]
     u = await Database.get_user(call.from_user.id)
     await state.update_data(edit_id=rid)
@@ -616,10 +639,10 @@ async def edit_start(call: types.CallbackQuery, state: FSMContext):
     ])
     await call.message.answer(t("edit_what", u[5]), reply_markup=kb)
     await state.set_state(EditFSM.choosing_option)
-    await call.answer()
 
 @router.callback_query(F.data.startswith("edopt_"), StateFilter(EditFSM.choosing_option))
 async def edit_option_handler(call: types.CallbackQuery, state: FSMContext):
+    await safe_callback_answer(call)
     action = call.data.split("_")[1]
     if action == "cancel":
         await call.message.delete()
@@ -658,6 +681,7 @@ async def edit_date_process(callback: types.CallbackQuery, callback_data: dict, 
 @router.callback_query(F.data.startswith("time_"), StateFilter(EditFSM.editing_time))
 async def edit_time_btn(callback: types.CallbackQuery, state: FSMContext):
     time_val = callback.data.split("_")[1]
+    await safe_callback_answer(callback)
     await save_new_time(callback.message, time_val, state, callback.from_user.id)
 
 @router.message(StateFilter(EditFSM.editing_time))
@@ -672,7 +696,7 @@ async def save_new_time(message, time_val, state, user_id):
     data = await state.get_data()
     full_dt = f"{data['new_date']} {time_val}:00"
     await Database.update_reminder_field(data['edit_id'], "remind_time", full_dt)
-    done = await message.answer(f"✅ {full_dt}", reply_markup=await get_kb(message.chat.id))
+    done = await message.answer(f"✅ {full_dt}", reply_markup=await get_kb(user_id))
     schedule_delete(done)
     await state.clear()
 
@@ -682,8 +706,8 @@ async def confirm_reminder(call: types.CallbackQuery):
     rid = call.data.split("_")[1]
     await Database.update_reminder_field(rid, "status", "fired")
     await Database.update_reminder_field(rid, "last_spam_sent_at", None)
-    await call.message.edit_reply_markup(reply_markup=None)
-    await call.answer("✅ Відмічено")
+    await safe_edit_reply_markup(call.message, reply_markup=None)
+    await safe_callback_answer(call, "✅ Відмічено")
     schedule_delete(call.message, delay=2)
 
 @router.callback_query(F.data.startswith("del_"))
@@ -692,7 +716,7 @@ async def del_rem(call: types.CallbackQuery):
     u = await Database.get_user(call.from_user.id)
     await Database.delete_reminder(rid)
     await call.message.delete()
-    await call.answer(t("deleted_ok", u[5]))
+    await safe_callback_answer(call, t("deleted_ok", u[5]))
 
 # --- ІНШІ ХЕНДЛЕРИ (ГОЛОС, ФОТО, ТЕКСТ) ---
 

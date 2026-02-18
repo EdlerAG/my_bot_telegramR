@@ -3,7 +3,6 @@ import logging
 from logging.handlers import RotatingFileHandler
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode
 from aiogram.types import BotCommand, BotCommandScopeDefault, BotCommandScopeChat
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -91,7 +90,9 @@ async def main():
 
     await Database.init()
     
-    bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
+    # Не задаємо глобальний parse_mode, щоб уникати TelegramBadRequest
+    # на звичайному тексті користувачів (символи _, *, <, > тощо).
+    bot = Bot(token=TOKEN, default=DefaultBotProperties())
     dp = Dispatcher()
     dp.include_router(router)
     
